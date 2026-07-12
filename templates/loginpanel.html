@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Login</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        body {
+            background: #121212;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #e0e0e0;
+        }
+        
+        .login-container {
+            background: #1e1e1e;
+            border-radius: 12px;
+            padding: 40px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+            border: 1px solid #333;
+        }
+        
+        .login-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .login-header h1 {
+            color: #ffffff;
+            font-size: 1.8rem;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+        
+        .login-header p {
+            color: #aaa;
+            font-size: 0.9rem;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group label {
+            display: block;
+            color: #e0e0e0;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        
+        .form-group input {
+            width: 100%;
+            padding: 12px 15px;
+            border: none;
+            border-radius: 8px;
+            background: #2d2d2d;
+            color: #e0e0e0;
+            font-size: 1rem;
+            border: 1px solid #444;
+            transition: all 0.3s ease;
+        }
+        
+        .form-group input:focus {
+            outline: none;
+            border-color: #666;
+            background: #333;
+            box-shadow: 0 0 0 2px rgba(100, 100, 100, 0.2);
+        }
+        
+        .form-group input::placeholder {
+            color: #888;
+        }
+        
+        .login-btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            background: #3a3a3a;
+            color: white;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-top: 10px;
+        }
+        
+        .login-btn:hover {
+            background: #4a4a4a;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+        }
+        
+        .login-btn:active {
+            transform: translateY(1px);
+        }
+        
+        .error-message {
+            background: #2d1e1e;
+            border: 1px solid #5a3a3a;
+            color: #ff6b6b;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+            display: none;
+            font-weight: 500;
+        }
+        
+        .security-notice {
+            text-align: center;
+            margin-top: 20px;
+            padding: 12px;
+            background: #252525;
+            border-radius: 8px;
+            color: #aaa;
+            font-size: 0.8rem;
+            border: 1px solid #333;
+        }
+        
+        .theme-toggle {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: #2d2d2d;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+        
+        .theme-toggle:hover {
+            background: #3a3a3a;
+        }
+    </style>
+</head>
+<body>
+    <button class="theme-toggle" onclick="toggleTheme()">☀️ Light Mode</button>
+    
+    <div class="login-container">
+        <div class="login-header">
+            <h1>🔐 Admin Panel</h1>
+            <p>Secure Access Required</p>
+        </div>
+        
+        <div class="error-message" id="errorMessage">
+            Invalid username or password
+        </div>
+        
+        <form id="loginForm">
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" placeholder="Enter your username" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" placeholder="Enter your password" required>
+            </div>
+            
+            <button type="submit" class="login-btn">Login</button>
+        </form>
+        
+        <div class="security-notice">
+            ⚠️ Authorized Personnel Only
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const errorMessage = document.getElementById('errorMessage');
+            
+            // Simple client-side validation
+            if (!username || !password) {
+                showError('Please fill in all fields');
+                return;
+            }
+            
+            // Send login request
+            fetch('/admin-login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    username: username,
+                    password: password
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // Redirect to panel on successful login
+                    window.location.href = '/panel';
+                } else {
+                    showError(data.error || 'Invalid credentials');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showError('Login failed. Please try again.');
+            });
+        });
+        
+        function showError(message) {
+            const errorMessage = document.getElementById('errorMessage');
+            errorMessage.textContent = message;
+            errorMessage.style.display = 'block';
+            
+            // Hide error after 5 seconds
+            setTimeout(() => {
+                errorMessage.style.display = 'none';
+            }, 5000);
+        }
+        
+        // Clear error when user starts typing
+        document.getElementById('username').addEventListener('input', hideError);
+        document.getElementById('password').addEventListener('input', hideError);
+        
+        function hideError() {
+            document.getElementById('errorMessage').style.display = 'none';
+        }
+        
+        // Theme toggle functionality
+        function toggleTheme() {
+            const body = document.body;
+            const themeToggle = document.querySelector('.theme-toggle');
+            
+            if (body.classList.contains('light-mode')) {
+                // Switch to dark mode
+                body.classList.remove('light-mode');
+                themeToggle.textContent = '☀️ Light Mode';
+                updateTheme('dark');
+            } else {
+                // Switch to light mode
+                body.classList.add('light-mode');
+                themeToggle.textContent = '🌙 Dark Mode';
+                updateTheme('light');
+            }
+        }
+        
+        function updateTheme(theme) {
+            const root = document.documentElement;
+            
+            if (theme === 'light') {
+                root.style.setProperty('--bg-color', '#f5f5f5');
+                root.style.setProperty('--container-bg', '#ffffff');
+                root.style.setProperty('--text-color', '#333333');
+                root.style.setProperty('--secondary-text', '#666666');
+                root.style.setProperty('--input-bg', '#f9f9f9');
+                root.style.setProperty('--input-border', '#dddddd');
+                root.style.setProperty('--button-bg', '#333333');
+                root.style.setProperty('--button-hover', '#222222');
+                root.style.setProperty('--error-bg', '#f8f8f8');
+                root.style.setProperty('--error-border', '#e0e0e0');
+                root.style.setProperty('--notice-bg', '#f5f5f5');
+            } else {
+                root.style.setProperty('--bg-color', '#121212');
+                root.style.setProperty('--container-bg', '#1e1e1e');
+                root.style.setProperty('--text-color', '#e0e0e0');
+                root.style.setProperty('--secondary-text', '#aaaaaa');
+                root.style.setProperty('--input-bg', '#2d2d2d');
+                root.style.setProperty('--input-border', '#444444');
+                root.style.setProperty('--button-bg', '#3a3a3a');
+                root.style.setProperty('--button-hover', '#4a4a4a');
+                root.style.setProperty('--error-bg', '#2d1e1e');
+                root.style.setProperty('--error-border', '#5a3a3a');
+                root.style.setProperty('--notice-bg', '#252525');
+            }
+        }
+    </script>
+</body>
+</html>
