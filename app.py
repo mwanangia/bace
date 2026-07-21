@@ -95,7 +95,7 @@ setting_states = {}
 def ensure_webhook():
     """Ensure webhook is set on every request"""
     try:
-        domain = os.environ.get('DOMAIN_URL', 'https://bace-y6q7.onrender.com')
+        domain = os.environ.get('DOMAIN_URL', 'https://bace-1.onrender.com')
         webhook_url = f"{domain}/telegram-webhook"
         
         # Check current webhook
